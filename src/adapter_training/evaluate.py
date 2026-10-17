@@ -86,10 +86,12 @@ def main() -> None:
     cfg.device = device
     policy = make_policy(cfg, ds_meta=dataset.meta)
     policy.eval()
+    extra = {"dataset_meta": dataset.meta, "dataset_stats": dataset.meta.stats} if cfg.type == "groot" else {}
     preprocessor, postprocessor = make_pre_post_processors(
         policy_cfg=cfg,
         pretrained_path=str(ckpt),
         preprocessor_overrides={"device_processor": {"device": device}},
+        **extra,
     )
 
     action_names = dataset.meta.features["action"]["names"]

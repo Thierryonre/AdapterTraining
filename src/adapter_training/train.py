@@ -1,8 +1,14 @@
-"""Train a SmolVLA LoRA adapter on a converted LeRobot dataset.
+"""Fine-tune a policy (SmolVLA LoRA adapter, or GR00T N1.7) on a converted LeRobot dataset.
 
-Thin wrapper around `lerobot-train` with LoRA defaults from the LeRobot PEFT docs
-(https://huggingface.co/docs/lerobot/peft_training). Runs LeRobot in-process so the TLS fix in
+Thin wrapper around `lerobot-train`. Runs LeRobot in-process so the TLS fix in
 `adapter_training/__init__.py` applies.
+
+SmolVLA (default): LoRA defaults from the LeRobot PEFT docs (https://huggingface.co/docs/lerobot/peft_training).
+GR00T N1.7 (--policy groot): the LeRobot/NVIDIA recipe (https://huggingface.co/docs/lerobot/groot) --
+the 3B vision-language backbone stays frozen; the projector and the flow-matching action head are
+trained for the robot ("new_embodiment"). LeRobot's GR00T has no working LoRA option (its lora_* config
+fields are deprecated and unused), so checkpoints contain the full policy (several GB). Needs an
+NVIDIA GPU (bf16) and `uv sync --extra groot`.
 
     # Smoke test on CPU
     uv run at-train --dataset local/mimicgen_stack_d1 --steps 5 --batch-size 2
@@ -12,6 +18,9 @@ Thin wrapper around `lerobot-train` with LoRA defaults from the LeRobot PEFT doc
 
     # Full fine-tune of the action expert instead of LoRA (for comparison)
     uv run at-train --dataset local/mimicgen_stack_d1 --no-peft
+
+    # GR00T N1.7 (GPU)
+    uv run at-train --policy groot --dataset local/pick_up_water_bottle --steps 20000 --batch-size 64
 
 Anything after `--` is passed straight to lerobot-train, e.g. `-- --wandb.enable=true`.
 """
@@ -26,6 +35,7 @@ import adapter_training  # noqa: F401  (TLS setup)
 from adapter_training.common import OUTPUTS_DIR, dataset_root, default_device, default_video_backend
 
 PROJECTIONS = ["state_proj", "action_in_proj", "action_out_proj"]
+BASE_MODELS = {"smolvla": "lerobot/smolvla_base", "groot": "nvidia/GR00T-N1.7-3B"}
 LORA_TIME_MLPS = "(action_time_mlp_in|action_time_mlp_out)"
 
 
@@ -44,18 +54,16 @@ def resolve_base_model(base_model: str) -> str:
 
 
 def build_lerobot_args(args: argparse.Namespace) -> list[str]:
-    job_name = args.job_name or f"{args.dataset.split('/')[-1]}_{'full' if args.no_peft else 'lora'}"
+    kind = "groot" if args.policy == "groot" else ("full" if args.no_peft else "lora")
+    job_name = args.job_name or f"{args.dataset.split('/')[-1]}_{kind}"
     output_dir = args.output_dir or OUTPUTS_DIR / "train" / f"{job_name}_{datetime.now():%Y%m%d_%H%M%S}"
     device = args.device or default_device()
+    base_model = args.base_model or BASE_MODELS[args.policy]
 
     cli = [
-        f"--policy.path={resolve_base_model(args.base_model)}",
         f"--dataset.repo_id={args.dataset}",
         f"--dataset.root={args.dataset_root or dataset_root(args.dataset)}",
         f"--dataset.video_backend={default_video_backend()}",
-        # Take camera/state/action shapes from the dataset instead of the SO-100 setup SmolVLA was pretrained on.
-        "--policy.input_features=null",
-        "--policy.output_features=null",
         "--policy.push_to_hub=false",
         f"--policy.device={device}",
         f"--batch_size={args.batch_size}",
@@ -75,6 +83,12 @@ def build_lerobot_args(args: argparse.Namespace) -> list[str]:
             f"--max_eval_samples={args.max_eval_samples}",
         ]
 
+    if args.policy == "groot":
+        cli += groot_args(args, base_model)
+        return cli + args.extra
+
+    # SmolVLA. Take camera/state/action shapes from the dataset instead of the SO-100 setup it was pretrained on.
+    cli += [f"--policy.path={resolve_base_model(base_model)}", "--policy.input_features=null", "--policy.output_features=null"]
     if args.no_peft:
         cli += [f"--policy.optimizer_lr={args.lr or 1e-4}"]
     else:
@@ -105,11 +119,36 @@ def build_lerobot_args(args: argparse.Namespace) -> list[str]:
     return cli + args.extra
 
 
+def groot_args(args: argparse.Namespace, base_model: str) -> list[str]:
+    """GR00T N1.7 fine-tuning flags, following the LeRobot GR00T docs."""
+    if (args.device or default_device()) != "cuda":
+        print("WARNING: GR00T N1.7 (3B, bf16) is meant for an NVIDIA GPU; this will be extremely slow or fail.")
+    cli = [
+        "--policy.type=groot",
+        f"--policy.base_model_path={base_model}",  # a plain string field: Hub ids are fine here
+        "--policy.embodiment_tag=new_embodiment",  # the slot GR00T reserves for robots it wasn't trained on
+        f"--policy.chunk_size={args.groot_chunk}",
+        f"--policy.n_action_steps={args.groot_chunk}",
+        # Arm joints as relative actions, grippers absolute (matches left_gripper.pos / right_gripper.pos).
+        "--policy.use_relative_actions=true",
+        '--policy.relative_exclude_joints=["gripper"]',
+        "--policy.use_bf16=true",
+        f"--policy.tune_llm={str(args.groot_tune_llm).lower()}",
+        f"--policy.tune_visual={str(args.groot_tune_visual).lower()}",
+        "--dataset.image_transforms.enable=true",
+        "--use_policy_training_preset=true",
+    ]
+    if args.lr:
+        cli.append(f"--policy.optimizer_lr={args.lr}")
+    return cli
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--dataset", required=True, help="LeRobot dataset id, e.g. local/mimicgen_stack_d1")
     parser.add_argument("--dataset-root", help="Dataset folder (default: data/lerobot/<name>)")
-    parser.add_argument("--base-model", default="lerobot/smolvla_base")
+    parser.add_argument("--policy", default="smolvla", choices=["smolvla", "groot"])
+    parser.add_argument("--base-model", help="Default: lerobot/smolvla_base or nvidia/GR00T-N1.7-3B")
     parser.add_argument("--job-name")
     parser.add_argument("--output-dir")
     parser.add_argument("--device", help="cuda / mps / cpu (default: auto)")
@@ -118,7 +157,7 @@ def main() -> None:
     parser.add_argument("--save-freq", type=int, help="Checkpoint every N steps (default: only at the end)")
     parser.add_argument("--log-freq", type=int, default=100)
     parser.add_argument("--num-workers", type=int, default=4)
-    parser.add_argument("--lr", type=float, help="Default 1e-3 for LoRA, 1e-4 for full fine-tuning")
+    parser.add_argument("--lr", type=float, help="Default 1e-3 for LoRA, 1e-4 for full fine-tuning / GR00T preset")
     parser.add_argument("--warmup-steps", type=int, help="LR warmup (SmolVLA default 1000)")
     parser.add_argument("--decay-steps", type=int, help="Cosine decay length (SmolVLA default 30000)")
     parser.add_argument("--eval-split", type=float, default=0.1, help="Fraction of episodes held out (0 disables)")
@@ -141,6 +180,10 @@ def main() -> None:
         action="store_true",
         help="Fully train state/action projections instead of adapting them with LoRA",
     )
+    groot = parser.add_argument_group("GR00T")
+    groot.add_argument("--groot-chunk", type=int, default=16, help="Action chunk length (LeRobot docs: 16)")
+    groot.add_argument("--groot-tune-llm", action="store_true", help="Also train the language model (much more memory)")
+    groot.add_argument("--groot-tune-visual", action="store_true", help="Also train the vision encoder")
     parser.add_argument("--dry-run", action="store_true", help="Print the lerobot-train command and exit")
 
     argv = sys.argv[1:]

@@ -176,11 +176,12 @@ def run(args) -> int:
             train_out = train_root / f"v{version}"
             latest_file = train_root / "latest.txt"
             previous = train_root / latest_file.read_text().strip() if latest_file.exists() else None
-            subprocess.run([sys.executable, "-m", "adapter_training.train", "--dataset", repo_id, "--job-name",
-                            f"{name_slug}_v{version}", "--output-dir", str(train_out), "--steps", str(args.steps),
-                            "--batch-size", str(args.batch_size)], check=True)
+            subprocess.run([sys.executable, "-m", "adapter_training.train", "--policy", args.policy, "--dataset", repo_id,
+                            "--job-name", f"{name_slug}_v{version}", "--output-dir", str(train_out), "--steps",
+                            str(args.steps), "--batch-size", str(args.batch_size)], check=True)
+            (train_out / "policy.txt").write_text(args.policy)
             adapter = train_out / "checkpoints" / "last" / "pretrained_model"
-            job.stage("training", status="done", adapter=str(adapter), version=f"v{version}",
+            job.stage("training", status="done", adapter=str(adapter), version=f"v{version}", policy=args.policy,
                       previous=str(previous) if previous else None)
             result["adapter"] = str(adapter)
 
@@ -236,7 +237,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--reuse-tracks", action="store_true", help="Reuse <clip>_tracks.npz in <out>/part1 (tests)")
     p.add_argument("--n", type=int, default=200, help="Demos to generate")
     p.add_argument("--workers", type=int, default=4)
-    p.add_argument("--train", action="store_true", help="Also train a SmolVLA LoRA adapter")
+    p.add_argument("--train", action="store_true", help="Also train a policy (SmolVLA LoRA adapter or GR00T)")
+    p.add_argument("--policy", default="smolvla", choices=["smolvla", "groot"],
+                   help="smolvla (LoRA adapter) or groot (GR00T N1.7: needs an NVIDIA GPU and `uv sync --extra groot`)")
     p.add_argument("--steps", type=int, default=20000)
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--stop-after", choices=["perception", "prepare"], help="Stop early (debugging)")

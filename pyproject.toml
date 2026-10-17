@@ -33,6 +33,10 @@ at-skill = "adapter_training.skill:main"
 at-run = "adapter_training.run:main"
 at-sim-eval = "adapter_training.sim_eval:main"
 
+[project.optional-dependencies]
+# GR00T N1.7 policy (NVIDIA GPU; ~3B parameters). Install with: uv sync --extra groot
+groot = ["lerobot[groot]==0.6.1"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

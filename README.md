@@ -54,6 +54,8 @@ Exit code 0 means done, 1 means stopped by a quality gate (the reason is in the 
 | `checkerboard.mp4` | a checkerboard moved around the view (accurate intrinsics) | optional, else `hfov` is used |
 | `setup.json` | `{"tag_size": 0.16, "tag_id": 0, "hfov": 70, "pattern": "9x6", "square": 0.025, "base_xyz": "-0.30,0,-0.45"}` | optional |
 
+**Policy:** `"policy": "smolvla"` (default, LoRA adapter) or `"policy": "groot"` (GR00T N1.7, see below).
+
 **Job file:** `{"name", "description", "videos", "setup", "train"}` plus any `at-skill` option with
 underscores, e.g. `"image_width": 512`, `"n": 200`, `"workers": 8`, `"steps": 20000`. Extra command-line
 flags are passed to `at-skill` as well (e.g. `--tracker mediapipe` for a CPU run).
@@ -494,6 +496,39 @@ alpha=64, lr 1e-3 → 1e-4, targeting the action expert's `q_proj`/`v_proj` plus
 One adapter per task: convert each task to its own dataset and train with its own `--job-name`.
 For a shared multi-task adapter, write all tasks into one dataset (each episode keeps its own `task` string).
 
+### GR00T N1.7 instead of SmolVLA
+
+```bash
+uv sync --extra groot                      # GR00T dependencies (diffusers, timm, dm-tree, decord)
+uv run at-train --policy groot --dataset local/pick_up_water_bottle --steps 20000 --batch-size 64
+uv run at-run --job job.json --policy groot --train      # or "policy": "groot" in the job file
+```
+
+This follows the [LeRobot GR00T recipe](https://huggingface.co/docs/lerobot/groot):
+- base model `nvidia/GR00T-N1.7-3B` (LeRobot dropped N1.5)
+- `embodiment_tag=new_embodiment`, the slot GR00T reserves for robots it wasn't trained on
+- 16-step action chunks
+- relative arm actions with the grippers kept absolute (`relative_exclude_joints=["gripper"]` matches
+  `left_/right_gripper.pos`)
+- bf16, image augmentation
+
+The vision-language backbone stays frozen while the projector and flow-matching action head train.
+`--groot-tune-visual` / `--groot-tune-llm` also unfreeze those (much more memory).
+
+How it differs from SmolVLA:
+- **No LoRA.** LeRobot's GR00T `lora_*` settings are deprecated and unused, so a GR00T "adapter" is the
+  fine-tuned action head and projector, and checkpoints hold the whole 3B policy (several GB per version).
+  Prune old versions under `outputs/train/<skill>/` on the cloud machine.
+- **Needs an NVIDIA GPU.** It's 3B parameters in bf16. Simulated evaluation runs the policy too, so it
+  also needs the GPU.
+- **License:** NVIDIA Open Model License.
+
+Verified here: LeRobot's own config parser accepts the generated GR00T training command (GrootConfig,
+frozen backbone, trained projector/action head, relative actions with grippers excluded). The `groot`
+extra installs on Windows. **Not run:** no GPU, and the base model is several GB. Versioning, the
+simulated comparison and promotion work the same for both policies, and a GR00T version can be compared
+against a SmolVLA version of the same skill.
+
 ## 4. Evaluate offline
 
 ```bash
@@ -517,6 +552,8 @@ lerobot-rollout --strategy.type=base \
 
 Camera names, state layout and task text must match the training dataset. Your robot needs a LeRobot
 `Robot` driver.
+
+For GR00T checkpoints, add `--policy.base_model_path=nvidia/GR00T-N1.7-3B` (as in the LeRobot docs).
 
 **OpenArm with a policy trained on generated data:** use the overlay robot, and the camera at the
 resolution and position it was calibrated at:

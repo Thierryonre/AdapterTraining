@@ -52,8 +52,9 @@ def load_policy(ckpt: Path, device: str):
     cfg.device = device
     policy = make_policy(cfg, ds_meta=meta)
     policy.eval()
+    extra = {"dataset_meta": meta, "dataset_stats": meta.stats} if cfg.type == "groot" else {}  # GR00T needs them
     pre, post = make_pre_post_processors(
-        policy_cfg=cfg, pretrained_path=str(ckpt), preprocessor_overrides={"device_processor": {"device": device}}
+        policy_cfg=cfg, pretrained_path=str(ckpt), preprocessor_overrides={"device_processor": {"device": device}}, **extra
     )
     image_key = next(k for k in cfg.input_features if "image" in k)
     _, h, w = cfg.input_features[image_key].shape
