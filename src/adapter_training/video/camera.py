@@ -172,6 +172,34 @@ def table_pose_from_frames(
     return np.linalg.inv(T_cam_table), float(np.mean(errors)), len(poses)
 
 
+def track_object_tag(
+    frames: list[np.ndarray],
+    calib: Calibration,
+    tag_id: int,
+    tag_size_m: float,
+    object_height_m: float,
+    family: str = "36h11",
+) -> np.ndarray:
+    """Pose (T, 4, 4) of an object with an AprilTag on its top face, in the table frame; NaN where unseen.
+
+    The object frame is the tag frame mapped like the table frame (x = tag's up direction, z up),
+    with its origin moved from the tag (top face) down to the object's centre.
+    """
+    detector = TagDetector(family, tag_id)
+    poses = np.full((len(frames), 4, 4), np.nan)
+    for t, frame in enumerate(frames):
+        corners = detector.detect(frame)
+        if corners is None:
+            continue
+        T_cam_tag, _ = tag_pose(corners, tag_size_m, calib.K_np, calib.dist_np)
+        T_table_tag = calib.T_np @ T_cam_tag
+        T = np.eye(4)
+        T[:3, :3] = T_table_tag[:3, :3] @ R_TAG_TABLE
+        T[:3, 3] = T_table_tag[:3, 3] - T_table_tag[:3, 2] * object_height_m / 2
+        poses[t] = T
+    return poses
+
+
 def draw_table_axes(frame_rgb: np.ndarray, calib: Calibration, length_m: float = 0.1) -> np.ndarray:
     """Draw the table frame (x red, y green, z blue) for checking the calibration by eye."""
     T_cam_table = np.linalg.inv(calib.T_np)

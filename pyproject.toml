@@ -22,6 +22,7 @@ at-fetch-robot = "adapter_training.video.robot:main"
 at-calibrate = "adapter_training.video.calibrate:main"
 at-video2robot = "adapter_training.video.pipeline:main"
 at-synthetic-demo = "adapter_training.video.synthetic:main"
+at-datagen = "adapter_training.datagen.cli:main"
 
 [build-system]
 requires = ["hatchling"]

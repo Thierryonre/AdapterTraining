@@ -24,7 +24,7 @@ from tqdm import tqdm
 
 import adapter_training  # noqa: F401  (TLS setup)
 from adapter_training.common import OUTPUTS_DIR
-from adapter_training.video.camera import Calibration, draw_table_axes
+from adapter_training.video.camera import Calibration, draw_table_axes, track_object_tag
 from adapter_training.video.hands import load_tracks, make_tracker, save_tracks, track_video
 from adapter_training.video.ik import BimanualIK
 from adapter_training.video.retarget import GripperTrack, retarget_hand, to_table_frame
@@ -161,7 +161,9 @@ def render_check_video(
 
 
 # -- export -------------------------------------------------------------------------------------------------
-def write_demo(h5: h5py.File, name: str, traj: RobotTrajectory, frames: list, image_size, source: str, robot) -> None:
+def write_demo(
+    h5: h5py.File, name: str, traj: RobotTrajectory, frames: list, image_size, source: str, robot, object_poses=None
+) -> None:
     demo = h5["data"].create_group(name)
     demo.attrs["source_video"] = source
     demo.attrs["num_samples"] = len(frames)
@@ -175,6 +177,13 @@ def write_demo(h5: h5py.File, name: str, traj: RobotTrajectory, frames: list, im
         obs.create_dataset(f"{side}_eef_pos", data=traj.eef[side]["pos"].astype(np.float32))
         obs.create_dataset(f"{side}_eef_quat", data=traj.eef[side]["quat"].astype(np.float32))
         obs.create_dataset(f"{side}_gripper_opening", data=traj.eef[side]["opening"][:, None].astype(np.float32))
+    if object_poses is not None:  # (T, 4, 4) table frame, NaN where the object tag wasn't seen
+        quats = np.full((len(object_poses), 4), np.nan)
+        for t, T in enumerate(object_poses):
+            if not np.isnan(T).any():
+                mujoco.mju_mat2Quat(quats[t], T[:3, :3].ravel())
+        obs.create_dataset("object_pos", data=object_poses[:, :3, 3].astype(np.float32))
+        obs.create_dataset("object_quat", data=quats.astype(np.float32))
     # Action = joint position target for the next step (what LeRobot's OpenArm driver takes).
     actions = np.concatenate([traj.joint_deg[1:], traj.joint_deg[-1:]], axis=0).astype(np.float32)
     ds = demo.create_dataset("actions", data=actions)
@@ -223,6 +232,12 @@ def process_video(video: Path, args, calib: Calibration, robot: RobotModel, trac
         kp_table = to_table_frame(tracks[side]["kp_cam"], calib.T_np)
         grippers[side] = retarget_hand(kp_table, tracks[side]["valid"], max_gap=int(args.max_gap_s * fps))
 
+    object_poses = None
+    if args.object_tag_id is not None:
+        object_poses = track_object_tag(
+            frames, calib, args.object_tag_id, args.object_tag_size, args.object_size[2], args.tag_family
+        )
+
     traj = solve_trajectory(robot, grippers)
     if not args.no_check_video:
         render_check_video(out_dir / f"{video.stem}_check.mp4", frames, tracks, grippers, traj, robot, calib, fps)
@@ -244,7 +259,11 @@ def process_video(video: Path, args, calib: Calibration, robot: RobotModel, trac
             for side in SIDES
         },
     }
-    return frames, fps, traj, summary
+    if object_poses is not None:
+        seen = ~np.isnan(object_poses[:, 0, 0])
+        summary["object_tag_seen_fraction"] = float(seen.mean())
+        summary["object_initial_xyz"] = object_poses[seen][0, :3, 3].round(4).tolist() if seen.any() else None
+    return frames, fps, traj, summary, object_poses
 
 
 def main() -> None:
@@ -262,7 +281,13 @@ def main() -> None:
     parser.add_argument("--reuse-tracks", action="store_true", help="Skip tracking if <video>_tracks.npz exists")
     parser.add_argument("--no-check-video", action="store_true")
     parser.add_argument("--append", action="store_true", help="Add demos to an existing demos.hdf5")
+    obj = parser.add_argument_group("object tracking (needed for Part 2 / at-datagen)")
+    obj.add_argument("--object-tag-id", type=int, help="ID of the AprilTag on the object's top face")
+    obj.add_argument("--object-tag-size", type=float, default=0.04, help="Object tag black square, metres")
+    obj.add_argument("--object-size", default="0.14,0.05,0.04", help="Object box size x,y,z in metres")
+    obj.add_argument("--tag-family", default="36h11")
     args = parser.parse_args()
+    args.object_size = tuple(float(v) for v in args.object_size.split(","))
 
     out_dir = args.out or OUTPUTS_DIR / "video2robot" / args.videos[0].stem
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -281,11 +306,13 @@ def main() -> None:
         frames0, _ = read_video(video, max_frames=1)
         h, w = frames0[0].shape[:2]
         robot = RobotModel(cfg, camera=calib.scaled(w, h).mujoco_camera())
-        frames, fps, traj, summary = process_video(video, args, calib, robot, tracker_factory, out_dir)
+        frames, fps, traj, summary, object_poses = process_video(video, args, calib, robot, tracker_factory, out_dir)
         if h5 is None:
             h5 = open_hdf5(h5_path, fps, args.task, cfg.name, args.append)
+            if args.object_tag_id is not None:
+                h5["data"].attrs["object_size"] = args.object_size
         name = f"demo_{next_demo_index(h5)}"
-        write_demo(h5, name, traj, frames, image_size, str(video), robot)
+        write_demo(h5, name, traj, frames, image_size, str(video), robot, object_poses)
         summaries[video.name] = {"demo": name, **summary}
         print(f"{video.name} -> {name}: " + json.dumps({s: summary[s] for s in SIDES}))
     h5.close()

@@ -77,7 +77,7 @@ def main() -> None:
     p.add_argument("video", type=Path)
     p.add_argument("--tag-size", type=float, required=True, help="Black square edge length in metres")
     p.add_argument("--tag-family", default="36h11")
-    p.add_argument("--tag-id", type=int)
+    p.add_argument("--tag-id", type=int, default=0, help="Table tag ID (keep it different from the object tag)")
     p.add_argument("--intrinsics", type=Path)
     p.add_argument("--hfov", type=float, help="Approximate horizontal field of view in degrees")
     p.add_argument("--stride", type=int, default=1)

@@ -144,7 +144,8 @@ def prepare_openarm(force: bool = False) -> Path:
 class RobotModel:
     """MuJoCo model of the robot standing at its configured pose in the table frame."""
 
-    def __init__(self, cfg: RobotConfig, camera: dict | None = None, table_size=(0.6, 0.9)):
+    def __init__(self, cfg: RobotConfig, camera: dict | None = None, table_size=(0.6, 0.9), customize=None):
+        """customize: optional callable(spec, robot_config) run before compiling (e.g. to add physics)."""
         self.cfg = cfg
         if cfg.name == "openarm_v1":
             prepare_openarm()
@@ -153,6 +154,8 @@ class RobotModel:
         self._add_scene(spec, table_size)
         if camera is not None:
             self._add_camera(spec, **camera)
+        if customize is not None:
+            customize(spec, cfg)
         self.model = spec.compile()
         self.data = mujoco.MjData(self.model)
         self._apply_extra_limits()
