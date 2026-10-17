@@ -1,12 +1,15 @@
 [project]
 name = "adapter-training"
 version = "0.1.0"
-description = "Convert MimicGen/robomimic demos to LeRobot format and train SmolVLA LoRA adapters"
+description = "Human video -> OpenArm trajectories -> LeRobot datasets -> SmolVLA LoRA adapters"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "h5py>=3.16.0",
     "lerobot[peft,smolvla,training]==0.6.1",
+    "mediapipe>=1.1.1",
+    "mink>=1.3.0",
+    "mujoco>=3.16.0",
     "truststore>=0.10.5",
 ]
 
@@ -15,6 +18,10 @@ at-download = "adapter_training.download:main"
 at-convert = "adapter_training.convert:main"
 at-train = "adapter_training.train:main"
 at-eval = "adapter_training.evaluate:main"
+at-fetch-robot = "adapter_training.video.robot:main"
+at-calibrate = "adapter_training.video.calibrate:main"
+at-video2robot = "adapter_training.video.pipeline:main"
+at-synthetic-demo = "adapter_training.video.synthetic:main"
 
 [build-system]
 requires = ["hatchling"]

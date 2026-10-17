@@ -66,14 +66,22 @@ def build_features(demo: h5py.Group, cameras: dict[str, str], state_keys: list[s
 
     state_names = []
     for key in state_keys:
-        dim = demo["obs"][key].shape[1]
-        state_names += [f"{key}_{i}" for i in range(dim)]
+        state_names += stored_names(demo["obs"][key]) or [f"{key}_{i}" for i in range(demo["obs"][key].shape[1])]
     features["observation.state"] = {"dtype": "float32", "shape": (len(state_names),), "names": state_names}
 
     action_dim = demo["actions"].shape[1]
-    action_names = OSC_POSE_ACTION_NAMES if action_dim == 7 else [f"a{i}" for i in range(action_dim)]
+    action_names = stored_names(demo["actions"]) or (
+        OSC_POSE_ACTION_NAMES if action_dim == 7 else [f"a{i}" for i in range(action_dim)]
+    )
     features["action"] = {"dtype": "float32", "shape": (action_dim,), "names": action_names}
     return features
+
+
+def stored_names(dataset: h5py.Dataset) -> list[str] | None:
+    """Per-dimension names saved by at-video2robot (e.g. LeRobot motor names like 'left_joint_1.pos')."""
+    if "names" not in dataset.attrs:
+        return None
+    return [n.decode() if isinstance(n, bytes) else str(n) for n in dataset.attrs["names"]]
 
 
 def main() -> None:
@@ -117,7 +125,7 @@ def main() -> None:
         env_args = json.loads(data.attrs["env_args"])
         env_name = env_args["env_name"]
         fps = args.fps or int(env_args["env_kwargs"].get("control_freq", 20))
-        task = args.task or task_for_env(env_name)
+        task = args.task or data.attrs.get("task") or task_for_env(env_name)
         if task is None:
             raise SystemExit(f"No instruction known for env '{env_name}'. Pass --task.")
 
