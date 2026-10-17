@@ -73,12 +73,24 @@ def _obs_without_image(env: HandoverEnv) -> dict:
         env.renderer = renderer
 
 
-def render_images(env: HandoverEnv, states: list) -> np.ndarray:
-    """Re-render camera frames from saved states (only done for episodes worth keeping)."""
+def render_images(env: HandoverEnv, states: list, compositor=None, background=None, appearance=None) -> np.ndarray:
+    """Re-render camera frames from saved states (only done for episodes worth keeping).
+
+    With a compositor, the robot and object are pasted onto the real `background` photo instead of
+    the plain simulated scene, using `appearance` (domain randomisation) if given.
+    """
+    if appearance is not None and appearance.object_rgba is not None:
+        saved_rgba = env.model.geom_rgba[env.obj_geom].copy()
+        env.model.geom_rgba[env.obj_geom] = appearance.object_rgba
     frames = []
     for state in states:
         env.set_state(state)
-        frames.append(env.observation()["front_image"])
+        if compositor is None:
+            frames.append(env.observation()["front_image"])
+        else:
+            frames.append(compositor.compose(background, env.data, appearance))
+    if appearance is not None and appearance.object_rgba is not None:
+        env.model.geom_rgba[env.obj_geom] = saved_rgba
     return np.stack(frames)
 
 

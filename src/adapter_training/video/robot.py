@@ -185,6 +185,7 @@ class RobotModel:
             rgba=[0.75, 0.7, 0.62, 1],
             contype=0,
             conaffinity=0,
+            group=2,
         )
         # Tag marker, for visual alignment against the real video.
         world.add_geom(
@@ -195,6 +196,7 @@ class RobotModel:
             rgba=[0.1, 0.1, 0.1, 1],
             contype=0,
             conaffinity=0,
+            group=2,
         )
 
     @staticmethod

@@ -26,33 +26,56 @@ import numpy as np
 from tqdm import tqdm
 
 import adapter_training  # noqa: F401  (TLS setup)
-
-
-def _json(obj) -> str:
-    return json.dumps(obj, indent=2, default=lambda o: o.item() if hasattr(o, "item") else str(o))
-
+from adapter_training.datagen.appearance import capture_background, load_image, sample_appearance
 from adapter_training.datagen.dataset import load_sources, open_output, render_images, write_episode
 from adapter_training.datagen.env import SIDES, HandoverEnv, ObjectSpec, SimConfig
 from adapter_training.datagen.generate import GenConfig, generate_episode, sample_object_pose
 from adapter_training.datagen.source import load_video_demos, replay_with_correction
 from adapter_training.datagen.task import HANDOVER_PHASES, HANDOVER_TASK, check_handover_order, phase_boundaries
+from adapter_training.render.composite import CameraWarp, Compositor, output_size
 from adapter_training.video.camera import Calibration
 from adapter_training.video.pipeline import VideoWriter
 from adapter_training.video.robot import openarm_config
+
+DEFAULT_CAMERA = {"pos": [0.95, 0.05, 0.55], "xyaxes": [-0.05, 1.0, 0, -0.49, -0.03, 0.87], "fovy": 50}
+
+
+def _json(obj) -> str:
+    return json.dumps(obj, indent=2, default=lambda o: o.item() if hasattr(o, "item") else str(o))
+
+
+def image_size(args, calib: Calibration | None) -> tuple[int, int]:
+    """'auto' = 320 px wide with the camera's aspect ratio (so training frames match the live camera)."""
+    if args.image_size != "auto":
+        return tuple(int(v) for v in args.image_size.lower().split("x"))
+    return output_size(calib, 320) if calib else (320, 240)
 
 
 def make_env(args, object_size) -> HandoverEnv:
     cfg = openarm_config()
     if args.base_xyz:
         cfg.base_xyz = tuple(float(v) for v in args.base_xyz.split(","))
-    w, h = (int(v) for v in args.image_size.lower().split("x"))
-    camera = None
-    if args.calib:
-        camera = Calibration.load(args.calib).scaled(w, h).mujoco_camera()
-    else:  # default view from across the table
-        camera = {"pos": [0.95, 0.05, 0.55], "xyaxes": [-0.05, 1.0, 0, -0.49, -0.03, 0.87], "fovy": 50}
-    sim = SimConfig(image_size=(w, h), shadows=args.shadows, obj=ObjectSpec(size=tuple(object_size)))
+    calib = Calibration.load(args.calib) if args.calib else None
+    w, h = image_size(args, calib)
+    camera = CameraWarp(calib, (w, h)).camera if calib else DEFAULT_CAMERA
+    obj = ObjectSpec(size=tuple(object_size))
+    if args.object_rgba:
+        obj.rgba = tuple(float(v) for v in args.object_rgba.split(","))
+    # Without a real background the env's own renderer makes the images; with one, the compositor does.
+    sim = SimConfig(image_size=(0, 0) if args.background else (w, h), shadows=args.shadows, obj=obj)
     return HandoverEnv(cfg, sim, camera=camera)
+
+
+def make_compositor(args, env: HandoverEnv):
+    """(compositor, background image) when --background is given, else (None, None)."""
+    if not args.background:
+        return None, None
+    if not args.calib:
+        raise SystemExit("--background needs --calib (the camera that took the photo).")
+    calib = Calibration.load(args.calib)
+    size = image_size(args, calib)
+    compositor = Compositor(env.model, calib, size, env.paste_geoms, shadows=args.shadows)
+    return compositor, load_image(args.background)
 
 
 def save_video(path: Path, frames: np.ndarray, fps: float) -> None:
@@ -70,6 +93,7 @@ def cmd_prepare(args) -> None:
     demos, _ = load_video_demos(args.demos, object_size[2])
     overrides = json.loads(Path(args.object_poses).read_text()) if args.object_poses else {}
     env = make_env(args, object_size)
+    compositor, background = make_compositor(args, env)
     fps = env.sim.control_hz
     out = open_output(args.out, env, args.task or attrs.get("task", HANDOVER_TASK), [p.name for p in HANDOVER_PHASES])
     report = {}
@@ -101,7 +125,7 @@ def cmd_prepare(args) -> None:
         if not kept:
             diag["reason"] = "replay failed in simulation"
         else:
-            images = render_images(env, ep.states)
+            images = render_images(env, ep.states, compositor, background)
             name = write_episode(out, ep, env, images, {"source": demo.name, "boundaries": bounds, "success": True})
             diag["saved_as"] = name
             if args.videos:
@@ -119,6 +143,8 @@ def _generate_worker(args, worker: int, n_target: int, max_trials: int, out_path
     """Generate until n_target successes (or max_trials) into out_path. Runs in its own process."""
     sources, meta = load_sources(args.sources)
     env = make_env(args, tuple(meta["object_size"]))
+    compositor, background = make_compositor(args, env)
+    base_rgba = tuple(env.model.geom_rgba[env.obj_geom])
     fps = env.sim.control_hz
     cfg = GenConfig(
         dx=(-args.dx, args.dx), dy=(-args.dy, args.dy), dyaw_deg=(-args.dyaw, args.dyaw), action_noise_m=args.noise
@@ -136,7 +162,8 @@ def _generate_worker(args, worker: int, n_target: int, max_trials: int, out_path
             reason = next((k for k, v in info.items() if k.endswith("_grasped") and not any(v.values())), "final check")
             failures[reason] = failures.get(reason, 0) + 1
             continue
-        images = render_images(env, ep.states)
+        appearance = sample_appearance(rng, base_rgba, args.randomize) if compositor and args.randomize else None
+        images = render_images(env, ep.states, compositor, background, appearance)
         attrs = {"source": src.name, "boundaries": info["boundaries"], "success": True, "object_xyz": obj[:3, 3].tolist()}
         write_episode(out, ep, env, images, attrs)
         if worker == 0 and successes < args.videos:
@@ -202,6 +229,16 @@ def cmd_generate(args) -> None:
     print(_json(summary))
 
 
+# -- background -------------------------------------------------------------------------------------------
+def cmd_background(args) -> None:
+    img = capture_background(args.video, args.max_frames, args.stride)
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    import cv2
+
+    cv2.imwrite(str(args.out), cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+    print(f"Saved {args.out} ({img.shape[1]}x{img.shape[0]}). Check nobody/nothing moving is left in it.")
+
+
 # -- validate ---------------------------------------------------------------------------------------------
 def cmd_validate(args) -> None:
     with h5py.File(args.dataset, "r") as h5:
@@ -232,9 +269,11 @@ def main() -> None:
 
     def common(p):
         p.add_argument("--calib", type=Path, help="Camera calibration: render images from the real camera's viewpoint")
-        p.add_argument("--image-size", default="320x240")
+        p.add_argument("--image-size", default="auto", help="WxH, or auto = 320 wide with the camera's aspect")
         p.add_argument("--base-xyz", help="Robot base in the table frame (must match Part 1)")
         p.add_argument("--shadows", action="store_true", help="Render shadows (slow without a real GPU)")
+        p.add_argument("--background", type=Path, help="Photo of the empty workspace (at-datagen background)")
+        p.add_argument("--object-rgba", help="Object colour r,g,b,a in 0-1 -- match your real object")
 
     p = sub.add_parser("prepare", help="Video demos -> simulation-validated source demos")
     p.add_argument("demos", type=Path, help="demos.hdf5 from at-video2robot")
@@ -258,8 +297,16 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--videos", type=int, default=3, help="Save videos of the first N generated demos")
     p.add_argument("--workers", type=int, default=1, help="Parallel simulation processes (use ~CPU cores)")
+    p.add_argument("--randomize", type=float, default=1.0, help="Appearance randomisation strength (0 = off)")
     common(p)
     p.set_defaults(func=cmd_generate)
+
+    p = sub.add_parser("background", help="Median frame of an empty-workspace clip -> background photo")
+    p.add_argument("video", type=Path)
+    p.add_argument("--out", type=Path, default=Path("data/calib/background.png"))
+    p.add_argument("--max-frames", type=int, default=300)
+    p.add_argument("--stride", type=int, default=3)
+    p.set_defaults(func=cmd_background)
 
     p = sub.add_parser("validate", help="Replay saved demos from their actions and check success")
     p.add_argument("dataset", type=Path)

@@ -123,6 +123,10 @@ class HandoverEnv:
         self.obj_body = self.model.body(self.sim.obj.name).id
         self.obj_qadr = self.model.jnt_qposadr[self.model.joint(f"{self.sim.obj.name}_joint").id]
         self.obj_geom = self.model.geom(f"{self.sim.obj.name}_geom").id
+        root = self.model.body(self.cfg.root_body).id
+        # Geoms that make up the robot and object in images (pasted onto real backgrounds).
+        self.robot_geoms = {g for g in range(self.model.ngeom) if self.model.body_rootid[self.model.geom_bodyid[g]] == root}
+        self.paste_geoms = self.robot_geoms | {self.obj_geom}
         self.arm_act = {s: [self.model.actuator(f"act_{j}").id for j in self.cfg.arms[s].joints] for s in SIDES}
         self.finger_act = {s: self.model.actuator(f"act_{self.cfg.arms[s].finger_joints[0]}").id for s in SIDES}
         # Finger collision geoms per arm, found via the finger joints' bodies (names like

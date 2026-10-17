@@ -144,10 +144,14 @@ demos.hdf5 (Part 1, with object tag)
 ```
 
 ```bash
+# Photo of the empty workspace from the fixed camera (median of a short clip; no robot, no people)
+uv run at-datagen background data/calib/empty_workspace.mp4 --out data/calib/background.png
+
 uv run at-datagen prepare outputs/video2robot/handover/demos.hdf5 --calib data/calib/camera.json \
-    --out outputs/datagen/handover/sources.hdf5 --videos
+    --background data/calib/background.png --out outputs/datagen/handover/sources.hdf5 --videos
 uv run at-datagen generate outputs/datagen/handover/sources.hdf5 --n 200 --workers 8 \
-    --calib data/calib/camera.json --out outputs/datagen/handover/generated.hdf5
+    --calib data/calib/camera.json --background data/calib/background.png --object-rgba 0.85,0.35,0.1,1 \
+    --shadows --out outputs/datagen/handover/generated.hdf5
 uv run at-datagen validate outputs/datagen/handover/generated.hdf5
 uv run at-convert outputs/datagen/handover/generated.hdf5 --repo-id local/handover_gen \
     --cameras front_image:front --state-keys joint_pos --robot-type bi_openarm_follower
@@ -170,21 +174,48 @@ relative to the object, right arm replayed as-is), `handover` (both arms relativ
 left hand, sharing one transform so their relative motion is kept — DexMimicGen's coordination
 subtask), `retreat` (replayed as-is). Each new episode samples an object pose (±4 cm, ±5 cm, ±20° yaw
 around a source demo's), transforms each phase's commanded gripper poses, interpolates between phases,
-runs IK + physics, and keeps it only on success. Images are re-rendered only for kept episodes, from
-the calibrated camera if `--calib` is given. Options: `--dx/--dy/--dyaw`, `--noise`, `--workers`,
-`--shadows`.
+runs IK + physics, and keeps it only on success. Images are rendered only for kept episodes. Options:
+`--dx/--dy/--dyaw`, `--noise`, `--workers`, `--shadows`, `--randomize`.
 
 **Validate** replays each saved demo's recorded actions from its first state and checks success again.
+
+### Making generated images match the real camera
+
+Code: `src/adapter_training/render/` (`composite.py`, `overlay.py`), `datagen/appearance.py`,
+`plugins/lerobot_robot_openarm_overlay/`.
+
+1. **Real background:** with `--background`, only the robot and object are rendered (from the calibrated
+   camera, including its principal point and lens distortion) and pasted onto your photo of the
+   empty workspace, so the table, lighting and surroundings are real. `--shadows` also darkens
+   the background where the robot and object would cast shadows (fast on a GPU, slow on integrated graphics).
+2. **Same robot at deployment (Phantom's trick):** run the policy with `--robot.type=bi_openarm_overlay`
+   instead of `bi_openarm_follower`. It's the same driver, but each camera frame gets the simulated robot drawn
+   at its measured joint angles over the real one. So the policy sees the rendered robot in training and on
+   the robot. The object is never overlaid: the policy sees the real one. Use it for `lerobot-record`
+   too if you record real demos to mix in.
+3. **Randomisation** (`--randomize`, default 1.0): per episode, light direction and intensity, object hue,
+   saturation and brightness around `--object-rgba` (set it to your real object's colour), image
+   brightness and contrast ±15%, and ~0.5 cm / 0.5° camera jitter to absorb calibration error between the
+   training images and the deployment overlay.
+4. **Aspect ratio:** images default to 320 px wide with the camera's aspect ratio (`--image-size auto`),
+   in Part 1 and Part 2, so frames match the live camera instead of being squeezed to 4:3.
+
+Verified on the synthetic scene: the warp puts 3D points within 0.7 px of OpenCV's projection with
+distortion and an off-centre principal point. A pasted marker lands 4.6 px (at 640 px wide) from
+the real tag, consistent with the synthetic calibration's ~8 mm error. For the same joint state, the
+deployment overlay and the training composite differ on < 0.25% of pixels. The plugin is discovered
+by LeRobot and constructs a `BiOpenArmOverlay` robot. The overlay takes ~130 ms/frame at 320 px on this
+laptop's integrated graphics (expect far less on a GPU; lower `--robot.overlay_render_width` if needed).
 
 ### Verified on synthetic demos (this laptop, CPU)
 
 | Step | Result |
 |---|---|
 | prepare, 3 synthetic video demos | 3/3 kept (left grasp corrections ≤ 2 mm, right 3–4 cm because the scripted handover point was rough) |
-| generate | 77–80% of attempts succeed; failures are missed left grasps or failed handovers |
-| speed | ~4 s physics per episode + ~15 s rendering 244 frames at 320×240 without shadows (integrated GPU); 8 demos in 104 s with 4 workers |
+| generate | ~68% of attempts succeed (27/40); failures are missed left grasps or failed handovers |
+| speed | ~4 s physics per episode + ~15 s rendering 244 frames without shadows (integrated GPU); 8 demos in 104 s with 4 workers |
 | validate | 10/10 and 8/8 generated demos succeed again from their recorded actions |
-| at-convert | `bi_openarm_follower` names, 30 fps, task text, 320×240 images |
+| at-convert | `bi_openarm_follower` names, 30 fps, task text, camera-aspect images |
 
 ### What went wrong on the way (and how it's handled)
 
@@ -197,8 +228,11 @@ the calibrated camera if `--calib` is given. Options: `--dx/--dy/--dyaw`, `--noi
 
 ### Limitations
 
-- **Sim-to-real:** generated images are MuJoCo renders (grey robot meshes, plain table). Mix real data
-  in for training, e.g. Part 1 demos once the robot overlay exists, or some teleop.
+- **Remaining appearance gaps:** the object is still rendered in training but real at deployment
+  (match its colour with `--object-rgba`; randomisation covers some difference). Parts of the real
+  robot the model doesn't include (cables, mounts) stay visible under the overlay. Without
+  `--shadows`, the real robot casts shadows the training images lack. Mixing in a few real demos
+  recorded with `bi_openarm_overlay` is still worthwhile.
 - **Approximate physics:** gripper-gripper collisions are off, so the generator can't detect the two
   hands clashing. Keep handover grasps on opposite ends of the object.
 - **One task:** phases and the success check are written for the handover (`task.py`, `env.py`).
@@ -292,6 +326,20 @@ lerobot-rollout --strategy.type=base \
 
 Camera names, state layout and task text must match the training dataset. Your robot needs a LeRobot
 `Robot` driver.
+
+**OpenArm with a policy trained on generated data:** use the overlay robot, and the camera at the
+resolution and position it was calibrated at:
+
+```bash
+lerobot-rollout --strategy.type=base \
+  --robot.type=bi_openarm_overlay \
+  --robot.left_arm_config.port=can0 --robot.left_arm_config.side=left \
+  --robot.right_arm_config.port=can1 --robot.right_arm_config.side=right \
+  --robot.cameras="{ front: {type: opencv, index_or_path: 0, width: 1280, height: 720, fps: 30}}" \
+  --robot.overlay_calib=data/calib/camera.json \
+  --task="Pass the bar from the left hand to the right hand." \
+  --policy.path=outputs/train/<run>/checkpoints/last/pretrained_model
+```
 
 ## Verified smoke test (this laptop, CPU only)
 

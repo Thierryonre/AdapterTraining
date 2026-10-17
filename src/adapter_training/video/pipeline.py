@@ -276,7 +276,9 @@ def main() -> None:
     parser.add_argument("--stride", type=int, default=1, help="Use every Nth frame (e.g. 2 turns 30 fps into 15)")
     parser.add_argument("--max-frames", type=int)
     parser.add_argument("--max-gap-s", type=float, default=0.3, help="Interpolate tracking dropouts up to this long")
-    parser.add_argument("--image-size", default="320x240", help="Exported camera frame size WxH")
+    parser.add_argument(
+        "--image-size", default="auto", help="Exported frame size WxH, or auto = 320 wide with the camera's aspect"
+    )
     parser.add_argument("--base-xyz", help="Robot base position in the table frame, e.g. -0.30,0,-0.45")
     parser.add_argument("--reuse-tracks", action="store_true", help="Skip tracking if <video>_tracks.npz exists")
     parser.add_argument("--no-check-video", action="store_true")
@@ -291,9 +293,12 @@ def main() -> None:
 
     out_dir = args.out or OUTPUTS_DIR / "video2robot" / args.videos[0].stem
     out_dir.mkdir(parents=True, exist_ok=True)
-    image_size = tuple(int(v) for v in args.image_size.lower().split("x"))
 
     calib = Calibration.load(args.calib)
+    if args.image_size == "auto":  # keep the camera's aspect ratio so frames match the live camera
+        image_size = (320, round(320 * calib.height / calib.width / 2) * 2)
+    else:
+        image_size = tuple(int(v) for v in args.image_size.lower().split("x"))
     cfg = openarm_config()
     if args.base_xyz:
         cfg.base_xyz = tuple(float(v) for v in args.base_xyz.split(","))

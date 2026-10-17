@@ -6,7 +6,8 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "h5py>=3.16.0",
-    "lerobot[peft,smolvla,training]==0.6.1",
+    "lerobot[damiao,peft,smolvla,training]==0.6.1",
+    "lerobot_robot_openarm_overlay",
     "mediapipe>=1.1.1",
     "mink>=1.3.0",
     "mujoco>=3.16.0",
@@ -30,6 +31,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/adapter_training"]
+
+[tool.uv.sources]
+lerobot_robot_openarm_overlay = { path = "plugins/lerobot_robot_openarm_overlay", editable = true }
 
 [tool.uv]
 # Use the OS certificate store (needed behind TLS-inspecting proxies/antivirus).
