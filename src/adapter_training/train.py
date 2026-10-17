@@ -4,6 +4,9 @@ Thin wrapper around `lerobot-train`. Runs LeRobot in-process so the TLS fix in
 `adapter_training/__init__.py` applies.
 
 SmolVLA (default): LoRA defaults from the LeRobot PEFT docs (https://huggingface.co/docs/lerobot/peft_training).
+π0.5 (--policy pi05): LoRA adapter on lerobot/pi05_base (LeRobot's default π0.5 targets: the action
+expert's attention + projections), bf16. Its tokenizer is the gated google/paligemma-3b-pt-224: accept
+the licence on the Hub and `hf auth login` first. Sized for an 80 GB GPU (batch 64).
 GR00T N1.7 (--policy groot): the LeRobot/NVIDIA recipe (https://huggingface.co/docs/lerobot/groot) --
 the 3B vision-language backbone stays frozen; the projector and the flow-matching action head are
 trained for the robot ("new_embodiment"). LeRobot's GR00T has no working LoRA option (its lora_* config
@@ -18,6 +21,9 @@ NVIDIA GPU (bf16) and `uv sync --extra groot`.
 
     # Full fine-tune of the action expert instead of LoRA (for comparison)
     uv run at-train --dataset local/mimicgen_stack_d1 --no-peft
+
+    # π0.5 LoRA adapter (GPU)
+    uv run at-train --policy pi05 --dataset local/pick_up_water_bottle --steps 20000 --batch-size 64
 
     # GR00T N1.7 (GPU)
     uv run at-train --policy groot --dataset local/pick_up_water_bottle --steps 20000 --batch-size 64
@@ -35,18 +41,19 @@ import adapter_training  # noqa: F401  (TLS setup)
 from adapter_training.common import OUTPUTS_DIR, dataset_root, default_device, default_video_backend
 
 PROJECTIONS = ["state_proj", "action_in_proj", "action_out_proj"]
-BASE_MODELS = {"smolvla": "lerobot/smolvla_base", "groot": "nvidia/GR00T-N1.7-3B"}
+BASE_MODELS = {"smolvla": "lerobot/smolvla_base", "pi05": "lerobot/pi05_base", "groot": "nvidia/GR00T-N1.7-3B"}
+DEFAULT_LR = {"smolvla": (1e-4, 1e-3), "pi05": (2.5e-5, 2.5e-4)}  # (full fine-tune, LoRA ~10x)
 LORA_TIME_MLPS = "(action_time_mlp_in|action_time_mlp_out)"
 
 
-def resolve_base_model(base_model: str) -> str:
+def resolve_base_model(base_model: str, download: bool = True) -> str:
     """Download a Hub model to a local folder and return its path.
 
     LeRobot 0.6.1 turns `--policy.path` into a Path, which on Windows mangles Hub ids into
     'lerobot\\smolvla_base'. A local path avoids that, and the PEFT adapter config then records a
     local base-model path that loads offline at evaluation/deployment time.
     """
-    if Path(base_model).exists():
+    if Path(base_model).exists() or not download:
         return base_model
     from huggingface_hub import snapshot_download
 
@@ -87,13 +94,24 @@ def build_lerobot_args(args: argparse.Namespace) -> list[str]:
         cli += groot_args(args, base_model)
         return cli + args.extra
 
-    # SmolVLA. Take camera/state/action shapes from the dataset instead of the SO-100 setup it was pretrained on.
-    cli += [f"--policy.path={resolve_base_model(base_model)}", "--policy.input_features=null", "--policy.output_features=null"]
+    if args.policy == "pi05":
+        # pretrained_path loads weights only: features (cameras, state/action sizes) come from the dataset.
+        cli += [
+            "--policy.type=pi05",
+            f"--policy.pretrained_path={resolve_base_model(base_model, download=not args.dry_run)}",
+            "--policy.dtype=bfloat16",
+            f"--policy.gradient_checkpointing={str(args.pi05_gradient_checkpointing).lower()}",
+        ]
+    else:
+        # SmolVLA. Take camera/state/action shapes from the dataset instead of the SO-100 setup it was pretrained on.
+        cli += [f"--policy.path={resolve_base_model(base_model, download=not args.dry_run)}",
+                "--policy.input_features=null", "--policy.output_features=null"]
+    full_lr, lora_lr = DEFAULT_LR[args.policy]
     if args.no_peft:
-        cli += [f"--policy.optimizer_lr={args.lr or 1e-4}"]
+        cli += [f"--policy.optimizer_lr={args.lr or full_lr}"]
     else:
         # LoRA tolerates ~10x the full fine-tuning learning rate.
-        lr = args.lr or 1e-3
+        lr = args.lr or lora_lr
         cli += [
             f"--policy.optimizer_lr={lr}",
             f"--policy.scheduler_decay_lr={lr / 10}",
@@ -147,8 +165,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--dataset", required=True, help="LeRobot dataset id, e.g. local/mimicgen_stack_d1")
     parser.add_argument("--dataset-root", help="Dataset folder (default: data/lerobot/<name>)")
-    parser.add_argument("--policy", default="smolvla", choices=["smolvla", "groot"])
-    parser.add_argument("--base-model", help="Default: lerobot/smolvla_base or nvidia/GR00T-N1.7-3B")
+    parser.add_argument("--policy", default="smolvla", choices=["smolvla", "pi05", "groot"])
+    parser.add_argument("--base-model", help="Default: lerobot/smolvla_base, lerobot/pi05_base or nvidia/GR00T-N1.7-3B")
     parser.add_argument("--job-name")
     parser.add_argument("--output-dir")
     parser.add_argument("--device", help="cuda / mps / cpu (default: auto)")
@@ -171,7 +189,7 @@ def main() -> None:
     parser.add_argument("--wandb", action="store_true", help="Log to Weights & Biases")
 
     lora = parser.add_argument_group("LoRA")
-    lora.add_argument("--no-peft", action="store_true", help="Full fine-tune (SmolVLA trains its action expert)")
+    lora.add_argument("--no-peft", action="store_true", help="Full fine-tune instead of LoRA (SmolVLA: action expert; π0.5: everything)")
     lora.add_argument("--rank", type=int, default=64)
     lora.add_argument("--alpha", type=int, help="LoRA alpha (default: = rank)")
     lora.add_argument("--init", help="LoRA init, e.g. 'pissa', 'olora', 'gaussian' (PEFT init_lora_weights)")
@@ -180,6 +198,9 @@ def main() -> None:
         action="store_true",
         help="Fully train state/action projections instead of adapting them with LoRA",
     )
+    pi05 = parser.add_argument_group("π0.5")
+    pi05.add_argument("--pi05-gradient-checkpointing", action="store_true",
+                      help="Trade speed for memory (not needed for LoRA on an 80 GB GPU)")
     groot = parser.add_argument_group("GR00T")
     groot.add_argument("--groot-chunk", type=int, default=16, help="Action chunk length (LeRobot docs: 16)")
     groot.add_argument("--groot-tune-llm", action="store_true", help="Also train the language model (much more memory)")

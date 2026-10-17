@@ -54,7 +54,8 @@ Exit code 0 means done, 1 means stopped by a quality gate (the reason is in the 
 | `checkerboard.mp4` | a checkerboard moved around the view (accurate intrinsics) | optional, else `hfov` is used |
 | `setup.json` | `{"tag_size": 0.16, "tag_id": 0, "hfov": 70, "pattern": "9x6", "square": 0.025, "base_xyz": "-0.30,0,-0.45"}` | optional |
 
-**Policy:** `"policy": "smolvla"` (default, LoRA adapter) or `"policy": "groot"` (GR00T N1.7, see below).
+**Policy:** `"policy": "pi05"` (default, π0.5 LoRA adapter), `"smolvla"` (small LoRA adapter, runs
+anywhere, use it for CPU tests) or `"groot"` (GR00T N1.7). See "Policies" under Training.
 
 **Job file:** `{"name", "description", "videos", "setup", "train"}` plus any `at-skill` option with
 underscores, e.g. `"image_width": 512`, `"n": 200`, `"workers": 8`, `"steps": 20000`. Extra command-line
@@ -496,7 +497,42 @@ alpha=64, lr 1e-3 → 1e-4, targeting the action expert's `q_proj`/`v_proj` plus
 One adapter per task: convert each task to its own dataset and train with its own `--job-name`.
 For a shared multi-task adapter, write all tasks into one dataset (each episode keeps its own `task` string).
 
-### GR00T N1.7 instead of SmolVLA
+### Policies
+
+| | π0.5 (`pi05`, default for at-run/at-skill) | SmolVLA (`smolvla`) | GR00T N1.7 (`groot`) |
+|---|---|---|---|
+| Base model | `lerobot/pi05_base` (~3B) | `lerobot/smolvla_base` (450M) | `nvidia/GR00T-N1.7-3B` |
+| What's trained per skill | LoRA adapter (action expert attention + projections) | LoRA adapter | projector + action head (no LoRA in LeRobot) |
+| Per-version size | small (adapter) | small (adapter) | whole policy (several GB) |
+| Hardware | NVIDIA GPU; defaults sized for 80 GB (batch 64, bf16) | anything, incl. CPU smoke tests | NVIDIA GPU |
+| Extra setup | accept the gated `google/paligemma-3b-pt-224` licence + `hf auth login` | none | `uv sync --extra groot` |
+| Licence | Apache 2.0 | Apache 2.0 | NVIDIA Open Model License |
+
+### π0.5
+
+```bash
+hf auth login            # after accepting https://huggingface.co/google/paligemma-3b-pt-224 (gated tokenizer)
+uv run at-train --policy pi05 --dataset local/pick_up_water_bottle --steps 20000 --batch-size 64
+uv run at-run --job job.json --train          # π0.5 is the default; "policy": "pi05" to be explicit
+```
+
+The recipe follows the [LeRobot π0.5 docs](https://huggingface.co/docs/lerobot/pi05) and LeRobot's PEFT support:
+- `--policy.pretrained_path=lerobot/pi05_base`, which loads weights only, so cameras and state/action sizes come
+  from your dataset (no rename map needed)
+- bf16, LoRA rank 64 on LeRobot's default π0.5 targets
+- learning rate 2.5e-4 → 2.5e-5 (10× π0.5's full fine-tune rate, the usual LoRA scaling)
+- π0.5's default quantile normalization (the converted datasets already contain `q01`/`q99`)
+- 50-step action chunks
+
+`--pi05-gradient-checkpointing` trades speed for memory if you move to a smaller GPU. `--no-peft` does
+LeRobot's full fine-tune instead (80 GB).
+
+Verified here: LeRobot's parser accepts the generated π0.5 + LoRA config (PI05Config, bf16, quantile
+normalization, LoRA r=64), the training dataset has the quantile statistics π0.5 needs, and `at-skill`/`at-run`
+default to it. **Not run:** no GPU, and the base model is several GB. On Windows the base checkpoint is
+downloaded and passed as a local path, the same workaround as for SmolVLA.
+
+### GR00T N1.7
 
 ```bash
 uv sync --extra groot                      # GR00T dependencies (diffusers, timm, dm-tree, decord)

@@ -178,7 +178,8 @@ def run(args) -> int:
             previous = train_root / latest_file.read_text().strip() if latest_file.exists() else None
             subprocess.run([sys.executable, "-m", "adapter_training.train", "--policy", args.policy, "--dataset", repo_id,
                             "--job-name", f"{name_slug}_v{version}", "--output-dir", str(train_out), "--steps",
-                            str(args.steps), "--batch-size", str(args.batch_size)], check=True)
+                            str(args.steps), "--batch-size",
+                            str(args.batch_size or (32 if args.policy == "smolvla" else 64))], check=True)
             (train_out / "policy.txt").write_text(args.policy)
             adapter = train_out / "checkpoints" / "last" / "pretrained_model"
             job.stage("training", status="done", adapter=str(adapter), version=f"v{version}", policy=args.policy,
@@ -238,10 +239,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--n", type=int, default=200, help="Demos to generate")
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--train", action="store_true", help="Also train a policy (SmolVLA LoRA adapter or GR00T)")
-    p.add_argument("--policy", default="smolvla", choices=["smolvla", "groot"],
-                   help="smolvla (LoRA adapter) or groot (GR00T N1.7: needs an NVIDIA GPU and `uv sync --extra groot`)")
+    p.add_argument("--policy", default="pi05", choices=["pi05", "smolvla", "groot"],
+                   help="pi05 (π0.5 LoRA adapter, default; GPU), smolvla (small LoRA adapter, runs anywhere) or "
+                        "groot (GR00T N1.7: GPU and `uv sync --extra groot`)")
     p.add_argument("--steps", type=int, default=20000)
-    p.add_argument("--batch-size", type=int, default=32)
+    p.add_argument("--batch-size", type=int, help="Default: 64 for pi05/groot (80 GB GPU), 32 for smolvla")
     p.add_argument("--stop-after", choices=["perception", "prepare"], help="Stop early (debugging)")
     gates = p.add_argument_group("quality gates")
     gates.add_argument("--min-tracked", type=float, default=0.8, help="Min fraction of frames with both hands tracked")
