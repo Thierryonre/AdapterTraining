@@ -182,7 +182,7 @@ def run(args) -> int:
         raise
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--name", required=True, help="Skill name (from the app)")
     p.add_argument("--description", default="", help="What the skill does (from the app); also the robot's instruction")
@@ -208,7 +208,11 @@ def main() -> None:
     gates.add_argument("--min-tracked", type=float, default=0.8, help="Min fraction of frames with both hands tracked")
     gates.add_argument("--min-sources", type=int, default=1, help="Min clips that must replay in simulation")
     gates.add_argument("--min-success-rate", type=float, default=0.1, help="Min generation success rate")
-    sys.exit(run(p.parse_args()))
+    return p
+
+
+def main() -> None:
+    sys.exit(run(build_parser().parse_args()))
 
 
 if __name__ == "__main__":

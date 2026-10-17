@@ -31,6 +31,38 @@ Windows certificate store. That's needed on this machine because something re-si
 
 ---
 
+# One command: `at-run`
+
+```bash
+uv run at-run --setup data/setup --name "Pick up water bottle" \
+    --description "Pick up the water bottle with the right hand and lift it." --videos clips/*.mp4 --train
+
+uv run at-run --job job.json     # same thing from a JSON file -- the easiest way for an app to call it
+```
+
+It chains everything: **camera calibration → background photo → hands → robot trajectories → objects →
+3D models + textures → simulation replay + task inference → generation → validation → LeRobot dataset
+→ LoRA training → offline evaluation**. It finishes with a stage-by-stage summary and `report.json`.
+Exit code 0 means done, 1 means stopped by a quality gate (the reason is in the report).
+
+**Setup folder**, recorded once per camera placement. Results are cached there and redone when a clip changes:
+
+| File | What | |
+|---|---|---|
+| `tag.mp4` | a few seconds with the table AprilTag visible, nobody in view | required |
+| `empty.mp4` | a few seconds of the empty workspace (background for generated images) | optional, else `tag.mp4` is used |
+| `checkerboard.mp4` | a checkerboard moved around the view (accurate intrinsics) | optional, else `hfov` is used |
+| `setup.json` | `{"tag_size": 0.16, "tag_id": 0, "hfov": 70, "pattern": "9x6", "square": 0.025, "base_xyz": "-0.30,0,-0.45"}` | optional |
+
+**Job file:** `{"name", "description", "videos", "setup", "train"}` plus any `at-skill` option with
+underscores, e.g. `"image_width": 512`, `"n": 200`, `"workers": 8`, `"steps": 20000`. Extra command-line
+flags are passed to `at-skill` as well (e.g. `--tracker mediapipe` for a CPU run).
+
+Verified here end to end on the synthetic bottle clips (GPU models replaced by stand-ins, 1 training step):
+every stage reached `done`, setup was cached on the second run and redone after `tag.mp4` changed.
+
+---
+
 # Skills from a clip: `at-skill` (no per-skill code)
 
 The entry point for an app: one or more clips, a skill name and a description, and nothing else. No

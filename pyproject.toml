@@ -30,6 +30,7 @@ at-video2robot = "adapter_training.video.pipeline:main"
 at-synthetic-demo = "adapter_training.video.synthetic:main"
 at-datagen = "adapter_training.datagen.cli:main"
 at-skill = "adapter_training.skill:main"
+at-run = "adapter_training.run:main"
 
 [build-system]
 requires = ["hatchling"]
