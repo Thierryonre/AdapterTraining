@@ -13,7 +13,7 @@ import cv2
 import numpy as np
 
 from adapter_training.datagen.env import SceneObject
-from adapter_training.perception.assets import build_scene_object, mask_colour
+from adapter_training.perception.assets import build_scene_object
 from adapter_training.perception.fit import FitResult, fit_mesh, fit_primitive, render_fit
 from adapter_training.perception.objects import ObjectInfo
 from adapter_training.video.camera import Calibration
@@ -26,6 +26,7 @@ class PerceptionConfig:
     min_primitive_iou: float = 0.65  # below this the object is rejected
     size_range_m: tuple[float, float] = (0.01, 0.6)
     hint_margin: float = 0.05  # prefer the described shape if its IoU is within this of the other
+    texture_size: int = 512  # texture resolution baked per object
     asset_cache: dict = field(default_factory=dict)  # object name -> SceneObject, shared across clips
 
 
@@ -93,8 +94,11 @@ def perceive_clip(
         else:
             entry["ok"] = True
             if name not in cfg.asset_cache:  # build assets once per object per skill
-                colour = mask_colour(frame, mask)
-                cfg.asset_cache[name] = build_scene_object(name, fit, out_dir / "objects" / name, colour, info.mass_kg)
+                obj_model, asset_info = build_scene_object(
+                    name, fit, out_dir / "objects" / name, frame, mask, cal, info.mass_kg, texture_size=cfg.texture_size
+                )
+                cfg.asset_cache[name] = obj_model
+                entry.update(asset_info)
             obj: SceneObject = cfg.asset_cache[name]
             pose = fit.pose.copy()
             pose[2, 3] = obj.size[2] / 2  # resting on the table at the cached model's height

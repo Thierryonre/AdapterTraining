@@ -60,7 +60,8 @@ def image_size(args, calib: Calibration | None) -> tuple[int, int]:
     """'auto' = 320 px wide with the camera's aspect ratio (so training frames match the live camera)."""
     if args.image_size != "auto":
         return tuple(int(v) for v in args.image_size.lower().split("x"))
-    return output_size(calib, 320) if calib else (320, 240)
+    width = getattr(args, "image_width", 320)
+    return output_size(calib, width) if calib else (width, width * 3 // 4)
 
 
 def make_env(args, objects: list[SceneObject]) -> SceneEnv:
@@ -192,7 +193,7 @@ def _generate_worker(args, worker: int, n_target: int, max_trials: int, out_path
     env = make_env(args, scene_from_meta(meta))
     env.success_fn = make_success_fn(spec)
     compositor, background = make_compositor(args, env)
-    base_colours = {o.name: o.rgba for o in env.sim.objects}
+    base_colours = {o.name: (None if o.texture else o.rgba) for o in env.sim.objects}
     fps = env.sim.control_hz
     cfg = GenConfig(
         dx=(-args.dx, args.dx), dy=(-args.dy, args.dy), dyaw_deg=(-args.dyaw, args.dyaw), action_noise_m=args.noise
@@ -321,7 +322,8 @@ def cmd_validate(args) -> tuple[int, int]:
 
 def add_common(p) -> None:
     p.add_argument("--calib", type=Path, help="Camera calibration: render images from the real camera's viewpoint")
-    p.add_argument("--image-size", default="auto", help="WxH, or auto = 320 wide with the camera's aspect")
+    p.add_argument("--image-size", default="auto", help="WxH, or auto = --image-width wide with the camera's aspect")
+    p.add_argument("--image-width", type=int, default=320, help="Width for --image-size auto (SmolVLA works at 512)")
     p.add_argument("--base-xyz", help="Robot base in the table frame (must match Part 1)")
     p.add_argument("--shadows", action="store_true", help="Render shadows (slow without a real GPU)")
     p.add_argument("--background", type=Path, help="Photo of the empty workspace (at-datagen background)")

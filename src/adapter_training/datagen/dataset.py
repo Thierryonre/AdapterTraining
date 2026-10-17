@@ -80,12 +80,17 @@ def render_images(env: SceneEnv, states: list, compositor=None, background=None,
     With a compositor, the robot and objects are pasted onto the real `background` photo instead of
     the plain simulated scene, using `appearance` (domain randomisation) if given.
     """
-    saved = {}
+    saved_geom, saved_mat = {}, {}
     if appearance is not None and appearance.object_rgba:
         for name, rgba in appearance.object_rgba.items():
             gid = env.model.geom(f"{name}_geom").id
-            saved[gid] = env.model.geom_rgba[gid].copy()
-            env.model.geom_rgba[gid] = rgba
+            mid = env.model.geom_matid[gid]
+            if mid >= 0:  # textured: tint the material (keeps the real texture recognisable)
+                saved_mat[mid] = env.model.mat_rgba[mid].copy()
+                env.model.mat_rgba[mid] = rgba
+            else:
+                saved_geom[gid] = env.model.geom_rgba[gid].copy()
+                env.model.geom_rgba[gid] = rgba
     frames = []
     for state in states:
         env.set_state(state)
@@ -93,8 +98,10 @@ def render_images(env: SceneEnv, states: list, compositor=None, background=None,
             frames.append(env.observation()["front_image"])
         else:
             frames.append(compositor.compose(background, env.data, appearance))
-    for gid, rgba in saved.items():
+    for gid, rgba in saved_geom.items():
         env.model.geom_rgba[gid] = rgba
+    for mid, rgba in saved_mat.items():
+        env.model.mat_rgba[mid] = rgba
     return np.stack(frames)
 
 

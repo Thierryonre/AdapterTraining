@@ -179,7 +179,30 @@ def bottle_mesh():
     neck.apply_translation([0, 0, 0.20])
     mesh = trimesh.util.concatenate([body, shoulder, neck])
     mesh.apply_translation(-mesh.bounds.mean(axis=0))
-    return mesh
+    return mesh.subdivide_to_size(max_edge=0.008)  # small faces, so colour bands follow the geometry
+
+
+def bottle_colours(points: np.ndarray) -> np.ndarray:
+    """RGB per point of the bbox-centred bottle: red cap, white label with a green logo on +x, blue body."""
+    z, x, y = points[:, 2], points[:, 0], points[:, 1]
+    cols = np.tile(np.array([60, 120, 220], float), (len(points), 1))  # blue body
+    label = (z > -0.05) & (z < 0.02)
+    cols[label] = [235, 235, 235]
+    logo = label & (x > 0.02) & (np.abs(y) < 0.015) & (z > -0.035) & (z < 0.005)
+    cols[logo] = [40, 170, 60]
+    cols[z > 0.09] = [210, 40, 40]  # cap
+    return cols
+
+
+def draw_mesh(frame: np.ndarray, mesh, colours_per_face: np.ndarray, T_table_obj: np.ndarray, T_table_cam, K) -> None:
+    """Paint a mesh into the image with flat face colours (far to near)."""
+    T_cam_obj = np.linalg.inv(T_table_cam) @ T_table_obj
+    V = mesh.vertices
+    Vc = V @ T_cam_obj[:3, :3].T + T_cam_obj[:3, 3]
+    px = cv2.projectPoints(V, cv2.Rodrigues(T_cam_obj[:3, :3])[0], T_cam_obj[:3, 3], K, np.zeros(5))[0].reshape(-1, 2)
+    order = np.argsort(-Vc[mesh.faces][:, :, 2].mean(axis=1))
+    for f in order:
+        cv2.fillConvexPoly(frame, np.round(px[mesh.faces[f]] * 4).astype(np.int32), colours_per_face[f].tolist(), shift=2)
 
 
 def make_bottle_demo(out: Path, name: str, bottle_xy, bg, T_table_cam, K, rng, noise_mm: float) -> None:
@@ -227,11 +250,15 @@ def make_bottle_demo(out: Path, name: str, bottle_xy, bg, T_table_cam, K, rng, n
     (out / "masks" / name).mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(out / "masks" / name / "water_bottle.png"), mask.astype(np.uint8) * 255)
     writer = VideoWriter(out / f"{name}.mp4", FPS, (W, H))
-    shade = np.array([60, 120, 220], np.uint8)  # blue bottle
+    T_table_obj = np.eye(4)
+    T_table_obj[:3, 3] = centre
+    face_cols = bottle_colours(mesh.triangles_center)
+    still = bg.copy()
+    draw_mesh(still, mesh, face_cols, T_table_obj, T_table_cam, K)
     for i in range(T):
         frame = bg.copy()
         if i < int(2.2 * FPS):  # the bottle is drawn where it stands until it's grasped
-            frame[mask] = shade
+            frame = still.copy()
         for side, color in (("left", (0, 220, 0)), ("right", (255, 60, 60))):
             for p in tracks[side]["kp2d"][i].astype(int):
                 cv2.circle(frame, tuple(p), 4, color, -1)
@@ -270,13 +297,14 @@ def main() -> None:
         import trimesh
 
         recon = bottle_mesh()
+        recon.visual.vertex_colors = np.column_stack([bottle_colours(recon.vertices), np.full(len(recon.vertices), 255)]).astype(np.uint8)
         recon.apply_transform(trimesh.transformations.rotation_matrix(np.pi / 2, [1, 0, 0]))
         recon.apply_transform(trimesh.transformations.rotation_matrix(0.7, [0, 0, 1]))
         recon.apply_scale(3.7)
         recon.apply_translation([1, 2, 3])
-        recon.export(args.out / "reconstructed_bottle.obj")
+        recon.export(args.out / "reconstructed_bottle.ply")  # PLY keeps the vertex colours
         (args.out / "ground_truth.json").write_text(json.dumps(truth, indent=2))
-        print(f"Wrote tag.mp4, {args.demos} bottle demos, masks/ and reconstructed_bottle.obj to {args.out}")
+        print(f"Wrote tag.mp4, {args.demos} bottle demos, masks/ and reconstructed_bottle.ply to {args.out}")
         return
 
     truth = {}

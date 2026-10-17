@@ -126,7 +126,8 @@ def run(args) -> int:
         # 3-5. Simulation: replay + infer task, generate, validate
         from adapter_training.datagen import cli as datagen
 
-        common = ["--calib", str(args.calib), *(["--background", str(args.background)] if args.background else []),
+        common = ["--calib", str(args.calib), "--image-width", str(args.image_width),
+                  *(["--background", str(args.background)] if args.background else []),
                   *(["--base-xyz", args.base_xyz] if args.base_xyz else []), *(["--shadows"] if args.shadows else [])]
         sources = out / "datagen" / "sources.hdf5"
         prep = datagen.cmd_prepare(datagen.build_parser().parse_args(
@@ -195,6 +196,7 @@ def main() -> None:
     p.add_argument("--no-claude", action="store_true", help="Don't call Claude to identify objects")
     p.add_argument("--base-xyz", help="Robot base in the table frame")
     p.add_argument("--shadows", action="store_true")
+    p.add_argument("--image-width", type=int, default=512, help="Generated image width (camera aspect ratio kept)")
     p.add_argument("--reuse-tracks", action="store_true", help="Reuse <clip>_tracks.npz in <out>/part1 (tests)")
     p.add_argument("--n", type=int, default=200, help="Demos to generate")
     p.add_argument("--workers", type=int, default=4)

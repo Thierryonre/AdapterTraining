@@ -47,7 +47,7 @@ uv run at-skill --name "Pick up water bottle" \
 |---|---|---|
 | video | Part 1: hands → gripper poses → OpenArm joint trajectories (table-aware IK) | both hands tracked in ≥ 80% of frames |
 | objects | Claude reads the name, description and first frame and lists the objects with a shape hint and mass (offline fallback: noun phrases) | at least one object |
-| perception | SAM 3 masks each object; SAM 3D Objects reconstructs its shape; the mesh is fitted to the mask on the calibrated table (stable resting pose, position, yaw, scale); box/cylinder fallback if the fit is poor; CoACD collision parts | outline IoU ≥ 0.8 (mesh) / 0.65 (shape), plausible size |
+| perception | SAM 3 masks each object; SAM 3D Objects reconstructs its shape; the mesh is fitted to the mask on the calibrated table (stable resting pose, position, yaw, scale); box/cylinder fallback if the fit is poor; texture baked from the clip (see below); CoACD collision parts | outline IoU ≥ 0.8 (mesh) / 0.65 (shape), plausible size |
 | simulation_replay | each clip replayed in physics with grasp correction; **task inferred**: phases from grasps/releases, reference object per arm, success = the demo's final arrangement | ≥ 1 clip reproduced; all clips must share one structure |
 | generation | DexMimicGen-style variations with objects moved | ≥ 10% success, ≥ n/4 demos |
 | validation | every demo replayed from its actions | ≥ 90% succeed |
@@ -75,6 +75,21 @@ Inferred on the synthetic tests with no task-specific code:
 | Bar handover | left grasps bar → right grasps bar (both relative to bar) → left releases → retreat | bar held by right, lifted |
 | Bottle pickup | right grasps water bottle → retreat | water bottle held by right, lifted |
 
+### Object textures (`perception/texture.py`)
+
+The mesh is UV-unwrapped (xatlas) and a texture is baked in layers:
+1. **Real pixels from the clip** wherever the fixed camera saw the surface (inside the object's mask, and
+   in front according to a depth test against the object itself). That's the side the policy mostly
+   sees at deployment, since the same camera is used.
+2. **The reconstruction's colours** elsewhere. The SAM 3D worker tries the pipeline's own texture baking
+   first and falls back to vertex colours (`object.json` records which).
+3. **The median colour** of the object's pixels if neither exists.
+
+The material is partly self-lit (the baked pixels already contain real shading). Randomisation only tints
+textured objects mildly (±12% brightness, slight colour cast) so labels stay recognisable. Box/cylinder
+fallbacks get textures the same way. `at-skill` generates 512-px-wide images by default (`--image-width`),
+matching SmolVLA's input size, so object details survive.
+
 ### GPU setup (cloud machine; not testable on this laptop)
 
 ```bash
@@ -99,9 +114,9 @@ rotated, scaled and offset copy of the bottle mesh (`--reconstructor mesh:<file>
 
 | Stage | Result |
 |---|---|
-| perception | mesh chosen in all 3 clips, outline IoU 0.976–0.984. Size 6.8 × 6.8 × 21.4 cm (true 7 × 7 × 22). Recovered from a mesh lying on its side at 3.7× scale. Bottle stands stably in physics (2 convex parts, 0.29 kg). |
+| perception | mesh chosen in all 3 clips, outline IoU 0.978–0.98. Size 6.8–6.9 × 21.4–21.6 cm (true 7 × 7 × 22). Recovered from a mesh lying on its side at 3.7× scale. ~3 s per fit. Stands stably in physics. Textured render vs the real frame: mean colour error 4.3/255 (44% of texels from real pixels). |
 | simulation_replay | 3/3 clips kept (after the two fixes below) |
-| generation | 12 demos, 75% success (12/16), 66 s with 4 workers |
+| generation | 12 demos, 71% success (12/17), 99 s with 4 workers (512 px images, textured bottle) |
 | validation | 12/12 |
 | dataset | `local/pick_up_water_bottle` |
 
@@ -121,6 +136,10 @@ fallback uses Claude's shape hint.
 - **Silhouette renderer holes:** OpenCV's multi-polygon fill uses even-odd filling and punched holes where front
   and back faces overlap. Triangles are now filled one by one.
 - **Re-anchoring twitch:** consecutive phases referencing the same object now keep their transform.
+- **Upright objects fitted lying down:** a bottle is more *stable* on its side, so the top-ranked resting poses
+  were all side-lying variants. Candidates are now one per distinct "up" direction.
+- **Mesh simplification ate thin parts** (the bottle's neck), so it's only used if the bounding box is preserved.
+  Fitting renders the outline from ~5,000 surface samples instead of triangles: 87 s → 3 s per fit at the same accuracy.
 
 ### What's not covered
 
@@ -130,7 +149,8 @@ fallback uses Claude's shape hint.
 - **Hinged or flexible objects** (drawers, lids, cloth) and **liquids**.
 - **Several identical objects:** SAM 3 keeps the highest-scoring instance per name.
 - **Objects hidden in the first frame** (perception uses frame 0).
-- **Reconstructed meshes use a single colour** (the median of the object's pixels), not a texture.
+- **Texture on sides the camera never saw** comes from the reconstruction (SAM 3D Objects' own baked
+  texture or vertex colours), so it's a guess. With a stand-in mesh that has no colours, it's the median colour.
 - **Speed:** CoACD took ~40 s per object on this CPU. It runs once per object per skill.
 
 ---

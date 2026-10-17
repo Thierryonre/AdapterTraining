@@ -16,6 +16,7 @@ dependencies = [
     "mujoco>=3.16.0",
     "trimesh>=5.1.1",
     "truststore>=0.10.5",
+    "xatlas>=0.0.11",
 ]
 
 [project.scripts]

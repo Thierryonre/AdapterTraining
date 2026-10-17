@@ -40,18 +40,29 @@ def _jitter_colour(rng, rgba, s: float) -> tuple:
     return (*rgb, 1.0)
 
 
+def _tint(rng, s: float) -> tuple:
+    """Mild multiplicative tint for textured objects: +/-12% brightness, slight colour cast."""
+    base = 1 + rng.uniform(-0.12, 0.12) * s
+    cast = rng.uniform(-0.05, 0.05, 3) * s
+    return (*np.clip(base + cast, 0.6, 1.0).tolist(), 1.0)
+
+
 def sample_appearance(rng: np.random.Generator, object_colours: dict, strength: float = 1.0) -> Appearance:
     """Random lighting, per-object colour, global brightness/contrast and a small camera perturbation.
 
-    object_colours: {object name: nominal rgba}. strength=0 gives the nominal appearance; 1 is the
-    default amount of variation.
+    object_colours: {object name: nominal rgba, or None for textured objects (they get a mild tint
+    around white so the real texture stays recognisable)}. strength=0 gives the nominal appearance;
+    1 is the default amount of variation.
     """
     s = strength
     return Appearance(
         light_dir=(rng.uniform(-0.5, 0.5) * s, rng.uniform(-0.5, 0.5) * s, -1.0),
         light_diffuse=float(0.6 + rng.uniform(-0.2, 0.2) * s),
         ambient=float(0.4 + rng.uniform(-0.15, 0.15) * s),
-        object_rgba={name: _jitter_colour(rng, rgba, s) for name, rgba in object_colours.items()},
+        object_rgba={
+            name: _jitter_colour(rng, rgba, s) if rgba is not None else _tint(rng, s)
+            for name, rgba in object_colours.items()
+        },
         brightness=float(1 + rng.uniform(-0.15, 0.15) * s),
         contrast=float(1 + rng.uniform(-0.15, 0.15) * s),
         # ~1 cm / ~1 deg: covers calibration error between training images and the deployment overlay

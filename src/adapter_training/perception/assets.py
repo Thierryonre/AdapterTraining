@@ -1,4 +1,4 @@
-"""Turn a fitted object into MuJoCo assets: visual mesh, convex collision parts, mass and colour."""
+"""Turn a fitted object into MuJoCo assets: textured visual mesh, convex collision parts, mass."""
 
 from pathlib import Path
 
@@ -8,6 +8,8 @@ import trimesh
 
 from adapter_training.datagen.env import SceneObject
 from adapter_training.perception.fit import FitResult
+from adapter_training.perception.texture import bake_texture, save_textured_obj
+from adapter_training.video.camera import Calibration
 
 DEFAULT_DENSITY = 400.0  # kg/m^3 of the bounding hull: household objects are part air (bottles, boxes)
 
@@ -38,36 +40,51 @@ def build_scene_object(
     name: str,
     fit: FitResult,
     out_dir: Path,
-    rgba,
+    frame_rgb: np.ndarray,
+    mask: np.ndarray,
+    calib: Calibration,
     mass_kg: float | None = None,
     friction: float = 1.2,
-) -> SceneObject:
-    """Write mesh files for a fitted object and describe it for the simulator."""
+    texture_size: int = 512,
+) -> tuple[SceneObject, dict]:
+    """Write a textured visual mesh and collision parts for a fitted object; returns (object, info)."""
     out_dir.mkdir(parents=True, exist_ok=True)
-    if fit.kind in ("box", "cylinder"):
-        volume = float(np.prod(fit.size)) * (np.pi / 4 if fit.kind == "cylinder" else 1.0)
-        mass = mass_kg or float(np.clip(DEFAULT_DENSITY * volume, 0.02, 1.5))
-        return SceneObject(name=name, shape=fit.kind, size=tuple(map(float, fit.size)), mass=mass, friction=friction, rgba=tuple(rgba))
+    median = mask_colour(frame_rgb, mask)
+    info = {}
+    visual_path, texture_path = out_dir / "visual.obj", out_dir / "texture.png"
+    try:
+        baked = bake_texture(fit.mesh, fit.pose, frame_rgb, mask, calib, median, size=texture_size)
+        save_textured_obj(baked, visual_path, texture_path)
+        info["texture_seen_fraction"] = round(baked.seen_fraction, 3)
+        texture = str(texture_path.resolve())
+    except Exception as e:  # untextured mesh with the median colour
+        fit.mesh.export(visual_path)
+        info["texture_error"] = f"{type(e).__name__}: {e}"[:200]
+        texture = None
 
-    visual = out_dir / "visual.obj"
-    fit.mesh.export(visual)
-    parts = convex_parts(fit.mesh)
+    if fit.kind in ("box", "cylinder"):  # the primitive is already convex
+        parts = [fit.mesh.convex_hull]
+        volume = float(np.prod(fit.size)) * (np.pi / 4 if fit.kind == "cylinder" else 1.0)
+    else:
+        parts = convex_parts(fit.mesh)
+        volume = float(fit.mesh.convex_hull.volume)
     paths, volumes = [], []
     for i, part in enumerate(parts):
         path = out_dir / f"collision_{i}.obj"
         part.export(path)
         paths.append(str(path.resolve()))
         volumes.append(float(part.volume))
-    hull_volume = float(fit.mesh.convex_hull.volume)
-    mass = mass_kg or float(np.clip(DEFAULT_DENSITY * hull_volume, 0.02, 1.5))
-    return SceneObject(
+    mass = mass_kg or float(np.clip(DEFAULT_DENSITY * volume, 0.02, 1.5))
+    obj = SceneObject(
         name=name,
         shape="mesh",
         size=tuple(map(float, fit.size)),
         mass=mass,
         friction=friction,
-        rgba=tuple(rgba),
-        visual_mesh=str(visual.resolve()),
+        rgba=tuple(median),
+        visual_mesh=str(visual_path.resolve()),
+        texture=texture,
         collision_meshes=paths,
         collision_volumes=volumes,
     )
+    return obj, info

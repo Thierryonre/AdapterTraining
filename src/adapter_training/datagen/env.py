@@ -37,6 +37,7 @@ class SceneObject:
     friction: float = 1.2
     rgba: tuple[float, float, float, float] = (0.85, 0.35, 0.1, 1.0)
     visual_mesh: str | None = None  # mesh file in the object frame (metres)
+    texture: str | None = None  # PNG for visual_mesh (needs texture coordinates in the mesh file)
     collision_meshes: list[str] = field(default_factory=list)  # convex parts, same frame
     collision_volumes: list[float] = field(default_factory=list)  # to split the mass between parts
 
@@ -97,10 +98,17 @@ def _add_object(spec: mujoco.MjSpec, obj: SceneObject) -> None:
     elif obj.shape == "mesh":
         visual = spec.add_mesh(name=f"{obj.name}_visual", file=obj.visual_mesh)
         visual.inertia = mujoco.mjtMeshInertia.mjMESH_INERTIA_CONVEX  # reconstructed meshes may not be watertight
-        body.add_geom(
+        geom = body.add_geom(
             name=f"{obj.name}_geom", type=mujoco.mjtGeom.mjGEOM_MESH, meshname=f"{obj.name}_visual",
             rgba=list(obj.rgba), contype=0, conaffinity=0, density=0, mass=0,
         )
+        if obj.texture:
+            spec.add_texture(name=f"{obj.name}_tex", type=mujoco.mjtTexture.mjTEXTURE_2D, file=obj.texture)
+            # Partly self-lit: the baked pixels already contain the real scene's shading.
+            mat = spec.add_material(name=f"{obj.name}_mat", rgba=[1, 1, 1, 1], emission=0.6, specular=0.1, shininess=0.1)
+            mat.textures[mujoco.mjtTextureRole.mjTEXROLE_RGB] = f"{obj.name}_tex"
+            geom.material = f"{obj.name}_mat"
+            geom.rgba = [1, 1, 1, 1]
         parts = obj.collision_meshes or [obj.visual_mesh]
         volumes = obj.collision_volumes or [1.0] * len(parts)
         total = float(sum(volumes)) or 1.0

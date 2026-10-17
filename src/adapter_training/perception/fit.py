@@ -52,6 +52,23 @@ class SilhouetteRenderer:
         return mask.astype(bool)
 
 
+    def render_points(self, points_table: np.ndarray, radius_px: int = 1) -> np.ndarray:
+        """Fast approximate silhouette from dense surface samples (used inside the optimiser)."""
+        px = np.round(self.project(points_table)).astype(int)
+        w, h = self.size
+        ok = (px[:, 0] >= 0) & (px[:, 0] < w) & (px[:, 1] >= 0) & (px[:, 1] < h)
+        mask = np.zeros((h, w), np.uint8)
+        mask[px[ok, 1], px[ok, 0]] = 1
+        k = 2 * radius_px + 1  # closing fills the gaps between samples without growing the outline
+        return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((k, k), np.uint8)).astype(bool)
+
+
+def surface_points(mesh: trimesh.Trimesh, n: int = 5000) -> np.ndarray:
+    """Evenly spread surface samples plus the vertices (keeps thin parts and silhouette corners)."""
+    pts, _ = trimesh.sample.sample_surface_even(mesh, n, seed=0)
+    return np.vstack([pts, mesh.vertices[:: max(1, len(mesh.vertices) // 2000)]])
+
+
 def iou(a: np.ndarray, b: np.ndarray) -> float:
     union = np.logical_or(a, b).sum()
     return float(np.logical_and(a, b).sum() / union) if union else 0.0
@@ -62,24 +79,42 @@ def _yaw_matrix(yaw: float) -> np.ndarray:
     return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
 
 
-def simplify(mesh: trimesh.Trimesh, max_faces: int = 2000) -> trimesh.Trimesh:
-    """Fewer faces for fast silhouette rendering (reconstructions can have 100k+ faces)."""
+def simplify(mesh: trimesh.Trimesh, max_faces: int = 3000, max_shape_change: float = 0.03) -> trimesh.Trimesh:
+    """Fewer faces for fast silhouette rendering (reconstructions can have 100k+ faces).
+
+    Quadric decimation can shrink thin parts of non-watertight meshes, so the result is only used if
+    the bounding box stays within `max_shape_change` of the original.
+    """
     if len(mesh.faces) <= max_faces:
         return mesh
     try:
-        return mesh.simplify_quadric_decimation(face_count=max_faces)
+        small = mesh.simplify_quadric_decimation(face_count=max_faces)
     except Exception:
         return mesh
+    change = np.abs(small.extents - mesh.extents) / max(mesh.extents.max(), 1e-9)
+    return small if change.max() <= max_shape_change else mesh
 
 
-def resting_orientations(mesh: trimesh.Trimesh, max_candidates: int = 4) -> list[np.ndarray]:
-    """Rotations (3x3) that put the mesh in its most likely stable resting poses (z up)."""
+def resting_orientations(mesh: trimesh.Trimesh, max_candidates: int = 8, min_angle_deg: float = 20.0) -> list[np.ndarray]:
+    """Rotations (3x3) for the mesh's stable resting poses (z up), one per distinct "up" direction.
+
+    The most *probable* poses aren't enough: a bottle is more stable lying down, but usually stands
+    upright. So candidates are grouped by which way the object points up, keeping the likeliest of each.
+    """
     try:
         transforms, probs = mesh.convex_hull.compute_stable_poses(n_samples=1)
-        order = np.argsort(probs)[::-1][:max_candidates]
-        return [transforms[i][:3, :3] for i in order]
     except Exception:  # degenerate hull: fall back to the mesh as given
         return [np.eye(3)]
+    chosen, ups = [], []
+    for i in np.argsort(probs)[::-1]:
+        R = transforms[i][:3, :3]
+        up = R.T @ np.array([0.0, 0.0, 1.0])  # object axis that ends up pointing up
+        if all(np.degrees(np.arccos(np.clip(np.dot(up, u), -1, 1))) > min_angle_deg for u in ups):
+            chosen.append(R)
+            ups.append(up)
+        if len(chosen) >= max_candidates:
+            break
+    return chosen or [np.eye(3)]
 
 
 def canonicalise(mesh: trimesh.Trimesh, rotation: np.ndarray) -> trimesh.Trimesh:
@@ -130,7 +165,7 @@ def fit_shape(
     work = (work_width, round(work_width * h / w))
     target = cv2.resize(mask.astype(np.uint8), work, interpolation=cv2.INTER_NEAREST).astype(bool)
     renderer = SilhouetteRenderer(calib, work)
-    V, F = unit_mesh.vertices, unit_mesh.faces
+    V = surface_points(unit_mesh)
     ext = unit_mesh.extents
 
     def place(p):
@@ -141,7 +176,7 @@ def fit_shape(
         return Vs @ _yaw_matrix(yaw).T + np.array([x, y, z])
 
     def loss(p):
-        return -iou(renderer.render(place(p), F), target)
+        return -iou(renderer.render_points(place(p)), target)
 
     # Coarse search: scale from mask size, yaw grid, position from the mask centroid ray.
     best = None
