@@ -1,0 +1,28 @@
+[project]
+name = "adapter-training"
+version = "0.1.0"
+description = "Convert MimicGen/robomimic demos to LeRobot format and train SmolVLA LoRA adapters"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "h5py>=3.16.0",
+    "lerobot[peft,smolvla,training]==0.6.1",
+    "truststore>=0.10.5",
+]
+
+[project.scripts]
+at-download = "adapter_training.download:main"
+at-convert = "adapter_training.convert:main"
+at-train = "adapter_training.train:main"
+at-eval = "adapter_training.evaluate:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/adapter_training"]
+
+[tool.uv]
+# Use the OS certificate store (needed behind TLS-inspecting proxies/antivirus).
+native-tls = true
