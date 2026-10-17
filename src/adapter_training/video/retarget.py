@@ -71,6 +71,7 @@ def retarget_hand(
     closed_percentile: float = 20.0,
     open_percentile: float = 95.0,
     table_clearance: float = 0.005,
+    min_aperture_range: float = 0.015,
 ) -> GripperTrack:
     """kp_table: (T, 21, 3) keypoints in the table frame, NaN where missing."""
     kp, covered = fill_gaps(kp_table, valid, max_gap)
@@ -93,9 +94,14 @@ def retarget_hand(
         lo, hi = np.percentile(aperture[valid], [closed_percentile, open_percentile])
     else:
         lo, hi = 0.0, 1.0
-    opening = np.clip((aperture - lo) / max(hi - lo, 1e-6), 0.0, 1.0)
-    opening = smooth(opening, smooth_window).clip(0, 1)
-    opening[aperture <= lo] = 0.0
+    if hi - lo < min_aperture_range:
+        # The pinch width barely changes: this hand never grasped. Without this, per-hand
+        # normalisation stretches tracking noise into repeated open/close "grasps".
+        opening = np.ones(len(aperture))
+    else:
+        opening = np.clip((aperture - lo) / (hi - lo), 0.0, 1.0)
+        opening = smooth(opening, smooth_window).clip(0, 1)
+        opening[aperture <= lo] = 0.0
 
     if not covered.all():
         pos[~covered] = np.nan  # long gaps: no target (the arm holds its pose)

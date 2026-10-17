@@ -1,12 +1,12 @@
-"""DexMimicGen-style data generation (Part 2, steps 5-6), reimplemented on the MuJoCo handover env.
+"""DexMimicGen-style data generation, reimplemented on the MuJoCo scene env.
 
 For each new episode:
-  1. put the object at a random pose and pick a source demo
-  2. for each phase, take the source's commanded gripper poses for that phase and re-express them
-     relative to where the object is *now* (arms with ref "object"; arms that share the object in one
-     phase share one transform), or replay them as-is (ref None)
-  3. interpolate from the current gripper poses to the start of the transformed segment
-  4. execute through IK + physics, keep the episode only if the handover succeeds
+  1. pick a source demo and move every object to a random pose near where it was in that demo
+  2. for each phase, take the source's commanded gripper poses and re-express them relative to where
+     the phase's reference object is *now* (arms sharing a reference share one transform), or replay
+     them as recorded (no reference)
+  3. interpolate from the current gripper poses to the start of each transformed segment
+  4. execute through IK + physics, keep the episode only if the task's success check passes
 """
 
 from dataclasses import dataclass
@@ -15,28 +15,52 @@ import numpy as np
 from scipy.spatial.transform import Rotation, Slerp
 
 from adapter_training.datagen.dataset import Episode, Recorder, SourceDemo
-from adapter_training.datagen.env import SIDES, HandoverEnv, pose_matrix
+from adapter_training.datagen.env import SIDES, SceneEnv, pose_matrix, yaw_pose
 from adapter_training.datagen.task import Phase
 
 
 @dataclass
 class GenConfig:
-    # Object pose randomisation, relative to the chosen source demo's initial object pose.
+    # Object pose randomisation, relative to the chosen source demo's initial object poses.
     dx: tuple[float, float] = (-0.04, 0.04)
     dy: tuple[float, float] = (-0.05, 0.05)
     dyaw_deg: tuple[float, float] = (-20.0, 20.0)
     interp_steps: int = 8  # steps to move from the current pose to each transformed segment
     hold_steps: int = 10  # steps to hold at the end before checking success
     action_noise_m: float = 0.0  # optional position noise on commanded poses (MimicGen uses ~5 mm)
+    min_gap_m: float = 0.01  # objects' footprints must be at least this far apart
 
 
+def _footprint_radius(size) -> float:
+    return float(np.hypot(size[0], size[1]) / 2)
+
+
+def sample_object_poses(src: SourceDemo, env: SceneEnv, cfg: GenConfig, rng, tries: int = 50) -> dict[str, np.ndarray]:
+    """Random pose per object around its source pose, upright on the table, footprints not overlapping."""
+    for _ in range(tries):
+        poses = {}
+        for name in env.object_names:
+            base = src.object_pose[name][0]
+            yaw = np.arctan2(base[1, 0], base[0, 0]) + np.radians(rng.uniform(*cfg.dyaw_deg))
+            x = base[0, 3] + rng.uniform(*cfg.dx)
+            y = base[1, 3] + rng.uniform(*cfg.dy)
+            poses[name] = yaw_pose(x, y, env.object_size(name)[2] / 2, yaw)
+        names = list(poses)
+        clear = all(
+            np.linalg.norm(poses[a][:2, 3] - poses[b][:2, 3])
+            > _footprint_radius(env.object_size(a)) + _footprint_radius(env.object_size(b)) + cfg.min_gap_m
+            for i, a in enumerate(names)
+            for b in names[i + 1 :]
+        )
+        if clear:
+            return poses
+    return {n: src.object_pose[n][0] for n in env.object_names}  # fall back to the source layout
+
+
+# Backwards-compatible single-object helper.
 def sample_object_pose(base: np.ndarray, cfg: GenConfig, rng: np.random.Generator, height: float) -> np.ndarray:
-    yaw0 = np.arctan2(base[1, 0], base[0, 0])
-    yaw = yaw0 + np.radians(rng.uniform(*cfg.dyaw_deg))
-    c, s = np.cos(yaw), np.sin(yaw)
-    pos = base[:3, 3] + np.array([rng.uniform(*cfg.dx), rng.uniform(*cfg.dy), 0.0])
-    pos[2] = height / 2
-    return pose_matrix(pos, np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]]))
+    yaw = np.arctan2(base[1, 0], base[0, 0]) + np.radians(rng.uniform(*cfg.dyaw_deg))
+    return yaw_pose(base[0, 3] + rng.uniform(*cfg.dx), base[1, 3] + rng.uniform(*cfg.dy), height / 2, yaw)
 
 
 def interpolate(T0: np.ndarray, T1: np.ndarray, n: int) -> list[np.ndarray]:
@@ -50,22 +74,35 @@ def interpolate(T0: np.ndarray, T1: np.ndarray, n: int) -> list[np.ndarray]:
     return out
 
 
-def transformed_segment(src: SourceDemo, phase: Phase, object_now: np.ndarray) -> tuple[dict, np.ndarray]:
+def transformed_segment(
+    src: SourceDemo, phase: Phase, env: SceneEnv, transforms: dict | None = None
+) -> tuple[dict, np.ndarray]:
+    """transforms: side -> (ref, 4x4) from the previous phase. An arm that keeps the same reference keeps
+    its transform, so motion stays continuous (re-anchoring on an object that both hands are holding
+    makes the arms twitch and can tear the grasp)."""
     a, b = src.boundaries[phase.name]
-    # One transform per phase: maps the source object pose at the phase start onto the current one.
-    transform = object_now @ np.linalg.inv(src.object_pose[a])
+    transforms = {} if transforms is None else transforms
     seg = {}
     for s in SIDES:
         poses = src.target_pose[s][a:b]
-        seg[s] = np.einsum("ij,tjk->tik", transform, poses) if phase.refs[s] == "object" else poses.copy()
+        ref = phase.refs.get(s)
+        if ref is None:
+            seg[s] = poses.copy()
+            transforms.pop(s, None)
+            continue
+        if transforms.get(s, (None,))[0] != ref:
+            # maps the source object pose at the phase start onto the object's current pose
+            transforms[s] = (ref, env.object_pose(ref) @ np.linalg.inv(src.object_pose[ref][a]))
+        seg[s] = np.einsum("ij,tjk->tik", transforms[s][1], poses)
     return seg, src.openings[a:b]
 
 
 def generate_episode(
-    env: HandoverEnv, src: SourceDemo, phases: list[Phase], object_pose: np.ndarray, cfg: GenConfig, rng
+    env: SceneEnv, src: SourceDemo, phases: list[Phase], object_poses: dict, cfg: GenConfig, rng
 ) -> tuple[Episode, bool, dict]:
     env.set_state(src.initial_state)  # same arm configuration as the source demo
-    env.set_object_pose(object_pose)
+    for name, T in object_poses.items():
+        env.set_object_pose(T, name)
     for _ in range(5):
         env._physics_step()
     rec = Recorder(env)
@@ -85,9 +122,9 @@ def generate_episode(
             arm = env.step_ee(cmd, ops)
             rec.after_command(cmd, arm, ops)
 
-    boundaries = {}
+    boundaries, transforms = {}, {}
     for phase in phases:
-        seg, seg_open = transformed_segment(src, phase, env.object_pose())
+        seg, seg_open = transformed_segment(src, phase, env, transforms)
         if len(seg_open) == 0:
             continue
         start = len(rec.ep)
@@ -102,10 +139,11 @@ def generate_episode(
         )
         current = {s: seg[s][-1] for s in SIDES}
         openings = {s: float(seg_open[-1, i]) for i, s in enumerate(SIDES)}
-        info[f"{phase.name}_grasped"] = {s: env.grasped(s) for s in SIDES}
+        info[f"{phase.name}_held"] = {n: sorted(env.holders(n)) for n in env.object_names}
         boundaries[phase.name] = [start, len(rec.ep)]
 
     run([dict(current) for _ in range(cfg.hold_steps)], [dict(openings) for _ in range(cfg.hold_steps)])
-    boundaries[phases[-1].name][1] = len(rec.ep)  # the final hold belongs to the last phase
+    if phases[-1].name in boundaries:
+        boundaries[phases[-1].name][1] = len(rec.ep)  # the final hold belongs to the last phase
     info["boundaries"] = boundaries
     return rec.ep, env.is_success(), info

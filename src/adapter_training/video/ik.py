@@ -24,6 +24,7 @@ class BimanualIK:
         posture_cost: float = 1e-2,
         iterations: int = 60,
         dt: float = 0.05,
+        avoid_table: bool = True,
     ):
         self.robot = robot
         self.configuration = mink.Configuration(robot.model)
@@ -41,8 +42,30 @@ class BimanualIK:
         robot.reset()
         self.posture.set_target(robot.data.qpos.copy())
         self.limits = [mink.ConfigurationLimit(robot.model)]
+        if avoid_table:
+            # Keep forearms, wrists and grippers above the table: matching gripper poses alone can
+            # produce elbow-down solutions that go through the tabletop.
+            self.limits.append(
+                mink.CollisionAvoidanceLimit(
+                    robot.model,
+                    geom_pairs=[(self._arm_geoms(robot), ["table"])],
+                    minimum_distance_from_collisions=0.01,
+                    collision_detection_distance=0.05,
+                )
+            )
         self.iterations = iterations
         self.dt = dt
+
+    @staticmethod
+    def _arm_geoms(robot: RobotModel) -> list[int]:
+        m = robot.model
+        bodies = set()
+        for arm in robot.cfg.arms.values():
+            for joint in arm.joints[2:] + arm.finger_joints:  # links 3-7, hand and fingers
+                bodies.add(m.jnt_bodyid[m.joint(joint).id])
+            bodies.add(m.body(arm.tcp_body).id)
+        bodies |= {b for b in range(m.nbody) if m.body_parentid[b] in bodies}  # hand bodies on fixed joints
+        return [g for g in range(m.ngeom) if m.geom_bodyid[g] in bodies and m.geom_contype[g]]
 
     def solve(
         self,

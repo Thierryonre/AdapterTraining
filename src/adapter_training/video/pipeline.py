@@ -266,7 +266,7 @@ def process_video(video: Path, args, calib: Calibration, robot: RobotModel, trac
     return frames, fps, traj, summary, object_poses
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("videos", nargs="+", type=Path)
     parser.add_argument("--calib", type=Path, required=True, help="Calibration JSON from at-calibrate")
@@ -288,8 +288,17 @@ def main() -> None:
     obj.add_argument("--object-tag-size", type=float, default=0.04, help="Object tag black square, metres")
     obj.add_argument("--object-size", default="0.14,0.05,0.04", help="Object box size x,y,z in metres")
     obj.add_argument("--tag-family", default="36h11")
-    args = parser.parse_args()
-    args.object_size = tuple(float(v) for v in args.object_size.split(","))
+    return parser
+
+
+def main() -> None:
+    run(build_parser().parse_args())
+
+
+def run(args) -> dict:
+    """Process videos into demos.hdf5. Returns per-video summaries."""
+    if isinstance(args.object_size, str):
+        args.object_size = tuple(float(v) for v in args.object_size.split(","))
 
     out_dir = args.out or OUTPUTS_DIR / "video2robot" / args.videos[0].stem
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -329,6 +338,7 @@ def main() -> None:
         f'"{h5_path}" --repo-id local/{out_dir.name} --cameras front_image:front --state-keys joint_pos '
         f'--robot-type bi_openarm_follower --task "{args.task}"'
     )
+    return summaries
 
 
 if __name__ == "__main__":

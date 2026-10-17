@@ -32,21 +32,26 @@ def load_image(path: Path) -> np.ndarray:
     return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
 
-def sample_appearance(rng: np.random.Generator, object_rgba, strength: float = 1.0) -> Appearance:
-    """Random lighting, object colour, global brightness/contrast and a small camera perturbation.
-
-    strength=0 gives the nominal appearance; 1 is the default amount of variation.
-    """
-    s = strength
-    hsv = cv2.cvtColor(np.uint8([[np.asarray(object_rgba[:3]) * 255]]), cv2.COLOR_RGB2HSV)[0, 0].astype(float)
+def _jitter_colour(rng, rgba, s: float) -> tuple:
+    hsv = cv2.cvtColor(np.uint8([[np.asarray(rgba[:3]) * 255]]), cv2.COLOR_RGB2HSV)[0, 0].astype(float)
     hsv += [rng.uniform(-6, 6) * s, rng.uniform(-30, 30) * s, rng.uniform(-30, 30) * s]
     hsv = np.clip(hsv, [0, 0, 0], [179, 255, 255])
     rgb = cv2.cvtColor(np.uint8([[hsv]]), cv2.COLOR_HSV2RGB)[0, 0] / 255.0
+    return (*rgb, 1.0)
+
+
+def sample_appearance(rng: np.random.Generator, object_colours: dict, strength: float = 1.0) -> Appearance:
+    """Random lighting, per-object colour, global brightness/contrast and a small camera perturbation.
+
+    object_colours: {object name: nominal rgba}. strength=0 gives the nominal appearance; 1 is the
+    default amount of variation.
+    """
+    s = strength
     return Appearance(
         light_dir=(rng.uniform(-0.5, 0.5) * s, rng.uniform(-0.5, 0.5) * s, -1.0),
         light_diffuse=float(0.6 + rng.uniform(-0.2, 0.2) * s),
         ambient=float(0.4 + rng.uniform(-0.15, 0.15) * s),
-        object_rgba=(*rgb, 1.0),
+        object_rgba={name: _jitter_colour(rng, rgba, s) for name, rgba in object_colours.items()},
         brightness=float(1 + rng.uniform(-0.15, 0.15) * s),
         contrast=float(1 + rng.uniform(-0.15, 0.15) * s),
         # ~1 cm / ~1 deg: covers calibration error between training images and the deployment overlay

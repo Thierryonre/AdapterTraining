@@ -59,7 +59,7 @@ class Appearance:
     light_dir: tuple = (0.0, 0.0, -1.0)
     light_diffuse: float = 0.6
     ambient: float = 0.4
-    object_rgba: tuple | None = None
+    object_rgba: dict | None = None  # object name -> rgba
     brightness: float = 1.0  # multiplies the whole composite
     contrast: float = 1.0
     camera_jitter: tuple = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)  # dx, dy, dz (m), droll, dpitch, dyaw (rad)

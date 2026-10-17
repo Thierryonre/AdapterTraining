@@ -167,11 +167,85 @@ def make_demo(out: Path, name: str, bar_xy, bg, T_table_cam, K, rng, noise_mm: f
     save_tracks(out / f"{name}_tracks.npz", tracks, FPS)
 
 
+def bottle_mesh():
+    """A 7 cm x 22 cm water bottle (body, shoulder, neck), bbox-centred."""
+    import trimesh
+
+    body = trimesh.creation.cylinder(radius=0.035, height=0.16, sections=48)
+    body.apply_translation([0, 0, 0.08])
+    shoulder = trimesh.creation.cone(radius=0.035, height=0.03, sections=48)
+    shoulder.apply_translation([0, 0, 0.16])
+    neck = trimesh.creation.cylinder(radius=0.015, height=0.04, sections=32)
+    neck.apply_translation([0, 0, 0.20])
+    mesh = trimesh.util.concatenate([body, shoulder, neck])
+    mesh.apply_translation(-mesh.bounds.mean(axis=0))
+    return mesh
+
+
+def make_bottle_demo(out: Path, name: str, bottle_xy, bg, T_table_cam, K, rng, noise_mm: float) -> None:
+    """Right hand picks up a standing water bottle and lifts it. Writes video, tracks and the GT mask."""
+    from adapter_training.perception.fit import SilhouetteRenderer
+    from adapter_training.video.camera import Calibration
+
+    mesh = bottle_mesh()
+    height = mesh.extents[2]
+    centre = np.array([bottle_xy[0], bottle_xy[1], height / 2])
+    approach, closing = np.array([1.0, 0.0, -0.2]), np.array([0.0, 1.0, 0.0])
+    a = approach / np.linalg.norm(approach)
+    grasp = centre + np.array([0, 0, 0.0])  # mid-height
+    lift = grasp + np.array([0.0, 0.0, 0.15])
+    keys = {
+        "left": [(0.0, [0.00, 0.26, 0.15], OPEN), (5.0, [0.00, 0.26, 0.15], OPEN)],
+        "right": [
+            (0.0, [0.00, -0.26, 0.15], OPEN),
+            (1.2, grasp - 0.12 * a, OPEN),
+            (2.0, grasp, OPEN),
+            (2.4, grasp, 0.07),
+            (3.8, lift, 0.07),
+            (5.0, lift, 0.07),
+        ],
+    }
+    T = int(5.0 * FPS)
+    t = np.arange(T) / FPS
+    T_cam_table = np.linalg.inv(T_table_cam)
+    tracks = {}
+    for side, k in keys.items():
+        times = np.array([x[0] for x in k])
+        pts = np.array([x[1] for x in k], dtype=float)
+        pos = np.stack([np.interp(t, times, pts[:, d]) for d in range(3)], axis=1)
+        aperture = np.interp(t, times, [x[2] for x in k])
+        app = approach if side == "right" else np.array([1.0, 0.0, -0.3])
+        kp = np.stack([hand_keypoints(pos[i], app, closing, aperture[i]) for i in range(T)])
+        kp += rng.normal(0, noise_mm / 1000, kp.shape)
+        kp_cam = kp @ T_cam_table[:3, :3].T + T_cam_table[:3, 3]
+        kp2d = np.stack([project(kp[i], T_table_cam, K) for i in range(T)])
+        valid = np.ones(T, bool)
+        tracks[side] = {"kp_cam": kp_cam, "kp2d": kp2d, "reproj_px": np.zeros(T), "score": valid * 1.0, "valid": valid}
+
+    calib = Calibration(W, H, K.tolist(), [0.0] * 5, T_table_cam.tolist())
+    mask = SilhouetteRenderer(calib, (W, H)).render(mesh.vertices + centre, mesh.faces)
+    (out / "masks" / name).mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(out / "masks" / name / "water_bottle.png"), mask.astype(np.uint8) * 255)
+    writer = VideoWriter(out / f"{name}.mp4", FPS, (W, H))
+    shade = np.array([60, 120, 220], np.uint8)  # blue bottle
+    for i in range(T):
+        frame = bg.copy()
+        if i < int(2.2 * FPS):  # the bottle is drawn where it stands until it's grasped
+            frame[mask] = shade
+        for side, color in (("left", (0, 220, 0)), ("right", (255, 60, 60))):
+            for p in tracks[side]["kp2d"][i].astype(int):
+                cv2.circle(frame, tuple(p), 4, color, -1)
+        writer.write(frame)
+    writer.close()
+    save_tracks(out / f"{name}_tracks.npz", tracks, FPS)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--out", type=Path, default=DATA_DIR / "synthetic")
     parser.add_argument("--demos", type=int, default=3)
     parser.add_argument("--noise-mm", type=float, default=3.0, help="Keypoint noise added to the tracks")
+    parser.add_argument("--scenario", choices=["handover", "bottle"], default="handover")
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(0)
@@ -185,6 +259,25 @@ def main() -> None:
     for _ in range(FPS):
         writer.write(bg)
     writer.close()
+
+    if args.scenario == "bottle":
+        truth = {}
+        for i in range(args.demos):
+            xy = np.array([0.14, -0.12]) + rng.uniform([-0.02, -0.02], [0.02, 0.02])
+            make_bottle_demo(args.out, f"bottle_{i}", xy, bg, T_table_cam, K, rng, args.noise_mm)
+            truth[f"bottle_{i}"] = {"bottle_centre": [*xy, float(bottle_mesh().extents[2] / 2)]}
+        # What a single-image reconstruction might return: arbitrary orientation, scale and offset.
+        import trimesh
+
+        recon = bottle_mesh()
+        recon.apply_transform(trimesh.transformations.rotation_matrix(np.pi / 2, [1, 0, 0]))
+        recon.apply_transform(trimesh.transformations.rotation_matrix(0.7, [0, 0, 1]))
+        recon.apply_scale(3.7)
+        recon.apply_translation([1, 2, 3])
+        recon.export(args.out / "reconstructed_bottle.obj")
+        (args.out / "ground_truth.json").write_text(json.dumps(truth, indent=2))
+        print(f"Wrote tag.mp4, {args.demos} bottle demos, masks/ and reconstructed_bottle.obj to {args.out}")
+        return
 
     truth = {}
     for i in range(args.demos):

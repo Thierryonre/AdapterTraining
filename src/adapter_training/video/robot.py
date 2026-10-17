@@ -183,8 +183,8 @@ class RobotModel:
             size=[table_size[0] / 2, table_size[1] / 2, 0.01],
             pos=[0, 0, -0.01],
             rgba=[0.75, 0.7, 0.62, 1],
-            contype=0,
-            conaffinity=0,
+            contype=1,  # lets the IK keep the arms above the table (this model is never physics-stepped)
+            conaffinity=1,
             group=2,
         )
         # Tag marker, for visual alignment against the real video.

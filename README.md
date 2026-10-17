@@ -31,6 +31,110 @@ Windows certificate store. That's needed on this machine because something re-si
 
 ---
 
+# Skills from a clip: `at-skill` (no per-skill code)
+
+The entry point for an app: one or more clips, a skill name and a description, and nothing else. No
+tags on objects, no code per skill.
+
+```bash
+uv run at-skill --name "Pick up water bottle" \
+    --description "Pick up the water bottle with the right hand and lift it." \
+    --videos clips/bottle_*.mp4 --calib data/calib/camera.json --background data/calib/background.png \
+    --tracker wilor --segmenter sam3 --reconstructor sam3d --n 200 --workers 8 --train
+```
+
+| Stage | What happens | Quality gate (job stops with a reason) |
+|---|---|---|
+| video | Part 1: hands → gripper poses → OpenArm joint trajectories (table-aware IK) | both hands tracked in ≥ 80% of frames |
+| objects | Claude reads the name, description and first frame and lists the objects with a shape hint and mass (offline fallback: noun phrases) | at least one object |
+| perception | SAM 3 masks each object; SAM 3D Objects reconstructs its shape; the mesh is fitted to the mask on the calibrated table (stable resting pose, position, yaw, scale); box/cylinder fallback if the fit is poor; CoACD collision parts | outline IoU ≥ 0.8 (mesh) / 0.65 (shape), plausible size |
+| simulation_replay | each clip replayed in physics with grasp correction; **task inferred**: phases from grasps/releases, reference object per arm, success = the demo's final arrangement | ≥ 1 clip reproduced; all clips must share one structure |
+| generation | DexMimicGen-style variations with objects moved | ≥ 10% success, ≥ n/4 demos |
+| validation | every demo replayed from its actions | ≥ 90% succeed |
+| dataset / training | LeRobot dataset `local/<skill>`; optional SmolVLA LoRA adapter | — |
+
+`<out>/report.json` (default `outputs/skills/<skill name>/`) records every stage's status, the QA
+numbers, the inferred task and the stop reason. The files for human review are
+`part1/*_check.mp4`, `part1/scenes/*_objects.png` and `datagen/source_*.mp4` / `generated_*.mp4`.
+
+### How the task is inferred (`datagen/task.py`)
+
+- **Phases** end at each gripper event (either arm closing or opening), in order.
+- **Grasping:** a closing arm works relative to the object it grasps.
+- **Releasing:** an opening arm works relative to the object the released one lands on or in (within 15 cm).
+  In a handover, it works relative to the released object, since the other hand still holds it. Otherwise
+  it replays its recorded motion (putting something down on the table).
+- **Coordination:** an arm holding an object that the other arm works relative to moves with it, sharing one transform.
+- **Success:** who holds what at the end (and lifted or not). Placed objects must end within 4 cm of where they
+  were put, relative to what they were put on. Untouched objects must stay upright.
+
+Inferred on the synthetic tests with no task-specific code:
+
+| Skill | Inferred phases | Inferred success check |
+|---|---|---|
+| Bar handover | left grasps bar → right grasps bar (both relative to bar) → left releases → retreat | bar held by right, lifted |
+| Bottle pickup | right grasps water bottle → retreat | water bottle held by right, lifted |
+
+### GPU setup (cloud machine; not testable on this laptop)
+
+```bash
+bash scripts/install_wilor.sh                    # hand tracker
+hf auth login                                    # after requesting access to facebook/sam3 (gated)
+# SAM 3D Objects: Linux, NVIDIA GPU with >= 32 GB VRAM, its own conda env (see its doc/setup.md),
+# checkpoints from facebook/sam-3d-objects (gated). Then point at-skill to it:
+export SAM3D_PYTHON=/path/to/envs/sam3d-objects/bin/python
+export SAM3D_REPO=/path/to/sam-3d-objects
+```
+
+SAM 3D Objects runs as a separate process (`scripts/sam3d_worker.py`), because its environment
+(PyTorch 2.5, Kaolin, PyTorch3D) can't share ours. Only its **shape** is used. Size and pose are always fitted
+to the calibrated table (`perception/fit.py`), so its camera conventions don't matter. Claude needs
+Anthropic credentials in the environment (`ANTHROPIC_API_KEY` or an `ant auth login` profile). Pass
+`--no-claude` to use the offline fallback.
+
+### Verified here (synthetic "pick up the water bottle", 3 clips)
+
+GPU models replaced by stand-ins: ground-truth masks (`--segmenter masks:<dir>`) and an arbitrarily
+rotated, scaled and offset copy of the bottle mesh (`--reconstructor mesh:<file>`).
+
+| Stage | Result |
+|---|---|
+| perception | mesh chosen in all 3 clips, outline IoU 0.976–0.984. Size 6.8 × 6.8 × 21.4 cm (true 7 × 7 × 22). Recovered from a mesh lying on its side at 3.7× scale. Bottle stands stably in physics (2 convex parts, 0.29 kg). |
+| simulation_replay | 3/3 clips kept (after the two fixes below) |
+| generation | 12 demos, 75% success (12/16), 66 s with 4 workers |
+| validation | 12/12 |
+| dataset | `local/pick_up_water_bottle` |
+
+Handover regression with the same changes: 3/3 kept, same inferred structure, 77.5% generation success
+(up from 67.5% before the table-aware IK).
+
+Fitting check on its own: from the arbitrarily posed mesh, size within 1 mm and position within 3 mm. A box
+fits the bottle's outline from one view almost as well as a cylinder (0.85 vs 0.88), which is why the
+fallback uses Claude's shape hint.
+
+### Problems found and fixed while testing
+
+- **Idle hand making phantom grasps:** a hand that never closes had its pinch noise stretched into
+  repeated open/close events. Hands whose pinch width varies by < 1.5 cm are now treated as always open.
+- **Elbow through the table:** gripper-pose IK picked elbow-down solutions for objects close to the robot,
+  and the forearm hit the table in simulation. The IK now keeps links 3–7 and the grippers ≥ 1 cm above the table.
+- **Silhouette renderer holes:** OpenCV's multi-polygon fill uses even-odd filling and punched holes where front
+  and back faces overlap. Triangles are now filled one by one.
+- **Re-anchoring twitch:** consecutive phases referencing the same object now keep their transform.
+
+### What's not covered
+
+- **Never run here:** SAM 3, SAM 3D Objects and WiLoR (no GPU), and real videos. Claude worked in one
+  quick test call. Check the overlays and videos of the first real jobs.
+- **Skills without grasps** (pushing, wiping, pressing) have no events to split on.
+- **Hinged or flexible objects** (drawers, lids, cloth) and **liquids**.
+- **Several identical objects:** SAM 3 keeps the highest-scoring instance per name.
+- **Objects hidden in the first frame** (perception uses frame 0).
+- **Reconstructed meshes use a single colour** (the median of the object's pixels), not a texture.
+- **Speed:** CoACD took ~40 s per object on this CPU. It runs once per object per skill.
+
+---
+
 # Part 1: Human video → OpenArm trajectories
 
 ```
@@ -169,12 +273,14 @@ the gripper is shifted so its fingers straddle the object's centre along the clo
 ≥ 1.5 cm inside its edges. Demos are kept only if both grasps hold and the handover succeeds.
 `prepare_report.json` lists every demo, its grasp corrections and why rejected ones failed.
 
-**Generate** (`generate.py`, `task.py`): phases come from gripper events. `left_grasp` (left arm
-relative to the object, right arm replayed as-is), `handover` (both arms relative to the object in the
-left hand, sharing one transform so their relative motion is kept — DexMimicGen's coordination
-subtask), `retreat` (replayed as-is). Each new episode samples an object pose (±4 cm, ±5 cm, ±20° yaw
-around a source demo's), transforms each phase's commanded gripper poses, interpolates between phases,
-runs IK + physics, and keeps it only on success. Images are rendered only for kept episodes. Options:
+**Generate** (`generate.py`, `task.py`): phases, reference objects and the success check are inferred
+from the replay (see the `at-skill` section). For the handover, the inferred phases are: left grasps the bar,
+right grasps it (both relative to the bar, sharing one transform: DexMimicGen's coordination subtask),
+left releases, retreat. Objects come from perception scene files (`--scenes`) or, for older data, the bar's
+tag. Each new episode samples every object's pose (±4 cm, ±5 cm, ±20° yaw around a source demo's,
+footprints not overlapping), transforms each phase's commanded gripper poses (an arm keeps its
+transform while its reference doesn't change), interpolates between phases, runs IK + physics, and keeps
+it only on success. Images are rendered only for kept episodes. Options:
 `--dx/--dy/--dyaw`, `--noise`, `--workers`, `--shadows`, `--randomize`.
 
 **Validate** replays each saved demo's recorded actions from its first state and checks success again.
