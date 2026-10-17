@@ -179,7 +179,8 @@ def run(args) -> int:
             subprocess.run([sys.executable, "-m", "adapter_training.train", "--policy", args.policy, "--dataset", repo_id,
                             "--job-name", f"{name_slug}_v{version}", "--output-dir", str(train_out), "--steps",
                             str(args.steps), "--batch-size",
-                            str(args.batch_size or (32 if args.policy == "smolvla" else 64))], check=True)
+                            str(args.batch_size or (32 if args.policy == "smolvla" else 64)),
+                            *(["--save-freq", str(args.save_freq)] if args.save_freq else [])], check=True)
             (train_out / "policy.txt").write_text(args.policy)
             adapter = train_out / "checkpoints" / "last" / "pretrained_model"
             job.stage("training", status="done", adapter=str(adapter), version=f"v{version}", policy=args.policy,
@@ -244,6 +245,7 @@ def build_parser() -> argparse.ArgumentParser:
                         "groot (GR00T N1.7: GPU and `uv sync --extra groot`)")
     p.add_argument("--steps", type=int, default=20000)
     p.add_argument("--batch-size", type=int, help="Default: 64 for pi05/groot (80 GB GPU), 32 for smolvla")
+    p.add_argument("--save-freq", type=int, help="Also save a checkpoint every N steps (default: only at the end)")
     p.add_argument("--stop-after", choices=["perception", "prepare"], help="Stop early (debugging)")
     gates = p.add_argument_group("quality gates")
     gates.add_argument("--min-tracked", type=float, default=0.8, help="Min fraction of frames with both hands tracked")
