@@ -1,0 +1,7 @@
+{
+  "name": "Pick up water bottle",
+  "description": "Pick up the water bottle with the right hand and lift it.",
+  "videos": ["clips/bottle_01.mp4", "clips/bottle_02.mp4", "clips/bottle_03.mp4"],
+  "setup": "data/setup",
+  "train": true
+}
