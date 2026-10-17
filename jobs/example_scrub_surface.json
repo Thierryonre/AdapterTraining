@@ -1,0 +1,7 @@
+{
+  "name": "Scrub surface",
+  "description": "Grip the sponge and use it on the surface in circular motions.",
+  "videos": ["examples/Task2_Scrubbing.mp4"],
+  "setup": "data/setup",
+  "train": true
+}

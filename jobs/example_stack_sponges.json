@@ -1,0 +1,7 @@
+{
+  "name": "Stack Sponges",
+  "description": "Pick up one of the sponges and stack it on top of the other.",
+  "videos": ["examples/Task1_Stacking.mp4"],
+  "setup": "data/setup",
+  "train": true
+}
