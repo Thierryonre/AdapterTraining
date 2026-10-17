@@ -11,6 +11,10 @@ training on bad data.
 
 Writes <out>/report.json (stage-by-stage status, QA numbers, reasons) -- what an app should show.
 Exit code 0 = dataset (and adapter) produced, 1 = stopped by a quality gate, 2 = error.
+
+With --train, adapters are versioned (outputs/train/<skill>/v1, v2, ...). After training, the new adapter
+and the previously promoted one run closed-loop in simulation on the same object layouts; the new one is
+promoted (latest.txt) only if it reaches --min-sim-success and isn't more than --max-regression worse.
 """
 
 import argparse
@@ -163,14 +167,46 @@ def run(args) -> int:
         job.stage("dataset", status="done", repo_id=repo_id, root=str(root))
 
         # 7. LoRA adapter (optional; needs a GPU in practice)
+        result = {"status": "done", "dataset": repo_id, "task": task_text}
         if args.train:
-            train_out = OUTPUTS_DIR / "train" / f"{name_slug}_lora"
+            # Versioned: outputs/train/<skill>/v1, v2, ... and latest.txt naming the promoted version.
+            train_root = OUTPUTS_DIR / "train" / name_slug
+            versions = sorted(int(p.name[1:]) for p in train_root.glob("v*") if p.name[1:].isdigit())
+            version = versions[-1] + 1 if versions else 1
+            train_out = train_root / f"v{version}"
+            latest_file = train_root / "latest.txt"
+            previous = train_root / latest_file.read_text().strip() if latest_file.exists() else None
             subprocess.run([sys.executable, "-m", "adapter_training.train", "--dataset", repo_id, "--job-name",
-                            f"{name_slug}_lora", "--output-dir", str(train_out), "--steps", str(args.steps),
+                            f"{name_slug}_v{version}", "--output-dir", str(train_out), "--steps", str(args.steps),
                             "--batch-size", str(args.batch_size)], check=True)
-            job.stage("training", status="done", adapter=str(train_out / "checkpoints" / "last" / "pretrained_model"))
+            adapter = train_out / "checkpoints" / "last" / "pretrained_model"
+            job.stage("training", status="done", adapter=str(adapter), version=f"v{version}",
+                      previous=str(previous) if previous else None)
+            result["adapter"] = str(adapter)
 
-        job.report["result"] = {"status": "done", "dataset": repo_id, "task": task_text}
+            # 8. Closed-loop simulation evaluation: new adapter (and the previous one, same layouts)
+            if args.sim_episodes > 0:
+                from adapter_training import sim_eval
+
+                ckpts = [train_out] + ([previous] if previous and previous.exists() else [])
+                res = sim_eval.evaluate(ckpts, sources, args.calib, args.background, episodes=args.sim_episodes,
+                                        videos=2, out=out / "sim_eval", base_xyz=args.base_xyz)
+                new_rate = res["checkpoints"][str(train_out)]["success_rate"]
+                prev_rate = res["checkpoints"][str(previous)]["success_rate"] if previous and len(ckpts) > 1 else None
+                info = {"new_success_rate": new_rate, "previous_success_rate": prev_rate,
+                        "episodes": args.sim_episodes, "videos": str(out / "sim_eval")}
+                if new_rate < args.min_sim_success:
+                    job.fail("sim_evaluation", f"new adapter succeeds in {new_rate:.0%} of simulated episodes "
+                             f"(need {args.min_sim_success:.0%}); kept as v{version} but not promoted", **info)
+                if prev_rate is not None and new_rate < prev_rate - args.max_regression:
+                    job.fail("sim_evaluation", f"new adapter ({new_rate:.0%}) is worse than {previous.name} "
+                             f"({prev_rate:.0%}); kept as v{version} but not promoted", **info)
+                job.stage("sim_evaluation", status="done", **info)
+            latest_file.parent.mkdir(parents=True, exist_ok=True)
+            latest_file.write_text(f"v{version}")  # promote
+            result["promoted"] = f"v{version}"
+
+        job.report["result"] = result
         job.save()
         return 0
     except GateFailed as e:
@@ -208,6 +244,9 @@ def build_parser() -> argparse.ArgumentParser:
     gates.add_argument("--min-tracked", type=float, default=0.8, help="Min fraction of frames with both hands tracked")
     gates.add_argument("--min-sources", type=int, default=1, help="Min clips that must replay in simulation")
     gates.add_argument("--min-success-rate", type=float, default=0.1, help="Min generation success rate")
+    gates.add_argument("--sim-episodes", type=int, default=50, help="Closed-loop simulation episodes after training (0 = skip)")
+    gates.add_argument("--min-sim-success", type=float, default=0.2, help="Min simulated success rate to promote an adapter")
+    gates.add_argument("--max-regression", type=float, default=0.05, help="Max allowed drop vs the previous adapter")
     return p
 
 

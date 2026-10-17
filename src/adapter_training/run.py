@@ -95,20 +95,20 @@ def skill_argv(job: dict, setup: dict) -> list[str]:
     return argv
 
 
-def evaluate(out: Path, name_slug: str) -> dict | None:
+def evaluate(adapter: Path, name_slug: str) -> dict | None:
     """Offline evaluation of the trained adapter on held-out episodes (action error vs a baseline)."""
-    ckpt = OUTPUTS_DIR / "train" / f"{name_slug}_lora"
-    if not (ckpt / "checkpoints").exists():
+    if not (adapter / "config.json").exists():
         return None
-    subprocess.run([sys.executable, "-m", "adapter_training.evaluate", "--checkpoint", str(ckpt),
+    subprocess.run([sys.executable, "-m", "adapter_training.evaluate", "--checkpoint", str(adapter),
                     "--dataset", f"local/{name_slug}", "--max-episodes", "3"], check=True)
-    result = json.loads((ckpt / "checkpoints" / "last" / "offline_eval.json").read_text())
+    result = json.loads((adapter.parent / "offline_eval.json").read_text())
     return {"action_mse": result["mse"], "mean_action_baseline_mse": result["baseline_mean_action_mse"],
             "frames": result["frames"]}
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    # allow_abbrev=False: unknown flags (e.g. --n) must reach at-skill, not match --name / --no-evaluate.
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter, allow_abbrev=False)
     p.add_argument("--job", type=Path, help="Job JSON file (alternative to the options below)")
     p.add_argument("--setup", type=Path, default=Path("data/setup"), help="Setup folder (see above)")
     p.add_argument("--name")
@@ -136,8 +136,9 @@ def main() -> None:
     report_path = out / "report.json"
     report = json.loads(report_path.read_text())
     report["setup"] = {k: str(v) for k, v in setup.items()}
-    if code == 0 and s_args.train and not (args.no_evaluate or job.get("evaluate") is False):
-        report["stages"]["evaluation"] = {"status": "done", **(evaluate(out, slug(s_args.name)) or {})}
+    adapter = report["stages"].get("training", {}).get("adapter")
+    if adapter and not (args.no_evaluate or job.get("evaluate") is False):
+        report["stages"]["offline_evaluation"] = {"status": "done", **(evaluate(Path(adapter), slug(s_args.name)) or {})}
     report_path.write_text(json.dumps(report, indent=2, default=str))
 
     result = report.get("result", {})
@@ -148,7 +149,11 @@ def main() -> None:
     if result.get("status") == "done":
         print(f"  dataset: {result.get('dataset')}")
         if "training" in report["stages"]:
-            print(f"  adapter: {report['stages']['training']['adapter']}")
+            print(f"  adapter: {report['stages']['training']['adapter']} (promoted: {result.get('promoted')})")
+        if "sim_evaluation" in report["stages"]:
+            se = report["stages"]["sim_evaluation"]
+            prev = se.get("previous_success_rate")
+            print(f"  simulated success: {se['new_success_rate']:.0%}" + (f" (previous {prev:.0%})" if prev is not None else ""))
     print(f"  report:  {report_path}")
     sys.exit(code)
 

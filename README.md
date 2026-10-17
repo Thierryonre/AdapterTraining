@@ -84,10 +84,43 @@ uv run at-skill --name "Pick up water bottle" \
 | generation | DexMimicGen-style variations with objects moved | ≥ 10% success, ≥ n/4 demos |
 | validation | every demo replayed from its actions | ≥ 90% succeed |
 | dataset / training | LeRobot dataset `local/<skill>`; optional SmolVLA LoRA adapter | — |
+| sim_evaluation | the new adapter (and the previously promoted one) run closed-loop in the simulated scene on the same 50 unseen object layouts | new adapter ≥ 20% success and ≤ 5 points worse than the previous one, else kept but not promoted |
 
 `<out>/report.json` (default `outputs/skills/<skill name>/`) records every stage's status, the QA
 numbers, the inferred task and the stop reason. The files for human review are
 `part1/*_check.mp4`, `part1/scenes/*_objects.png` and `datagen/source_*.mp4` / `generated_*.mp4`.
+
+### Adapter versions and simulated evaluation (`sim_eval.py`)
+
+Each training run is a new version: `outputs/train/<skill>/v1`, `v2`, …, and `latest.txt` names the promoted
+one, which is what to deploy. After training, `at-skill` / `at-run` run the new adapter and the current
+`latest` in simulation:
+- the objects go to 50 new random layouts, placed a bit wider than in generation and with different seeds;
+  both adapters get the same layouts
+- the camera image is rendered exactly as for training (robot and objects composited on the real background)
+- the policy acts, the physics steps, and the skill's inferred success check decides (it must hold for 5 steps)
+
+The new version is promoted only if it reaches `--min-sim-success` (default 20%) and isn't more than
+`--max-regression` (5 points) worse than the previous one. Otherwise the job stops with the reason, and the
+adapter is kept but not promoted. Results and two videos per adapter go to `<job>/sim_eval/`. Run it on its
+own to compare any checkpoints:
+
+```bash
+uv run at-sim-eval --checkpoints outputs/train/pick_up_water_bottle/v2 outputs/train/pick_up_water_bottle/v1     --sources outputs/skills/pick_up_water_bottle/datagen/sources.hdf5 --calib data/setup/camera.json     --background data/setup/background.png --episodes 50 --out outputs/sim_eval_compare
+```
+
+A plain "base model without adapter" comparison isn't included: on OpenArm the base SmolVLA has untrained
+input/output layers for this robot, so it would always score ~0%. Comparing against the previous version
+is what tells you whether new clips or settings helped.
+
+**Simulation success is optimistic.** The policy was trained on data from this simulator. Use it to catch broken
+training and to rank adapters, then confirm on the real robot.
+
+Verified here (CPU, 1-step adapters, so 0% success as expected): two consecutive `at-run` jobs created
+`v1` then `v2`. The second evaluated both on identical layouts (about 1 min per adapter for 2 episodes, plus
+model loading), and promotion and the `latest.txt` update behaved as configured. The images in the evaluation
+match the training images (512 × 288, textured object on the real background). The "reject and don't promote"
+branch is simple but wasn't exercised end to end.
 
 ### How the task is inferred (`datagen/task.py`)
 
