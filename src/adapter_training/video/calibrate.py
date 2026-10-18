@@ -51,7 +51,13 @@ def cmd_table(args) -> None:
     else:
         raise SystemExit("Pass --intrinsics (checkerboard calibration) or --hfov (approximate field of view).")
 
-    T, err, n = table_pose_from_frames(frames, args.tag_size, K, dist, args.tag_family, args.tag_id)
+    corners = getattr(args, "corners", None)
+    if isinstance(corners, str):
+        corners = [float(v) for v in corners.split(",")]
+    if corners is not None:
+        corners = [corners[i:i + 2] for i in range(0, 8, 2)] if len(corners) == 8 else corners
+    T, err, n = table_pose_from_frames(frames, args.tag_size, K, dist, args.tag_family, args.tag_id,
+                                       robot_side=getattr(args, "robot_side", None), corners_px=corners)
     calib = Calibration(w, h, K.tolist(), dist.tolist(), T.tolist(), err, n)
     calib.save(args.out)
     check = Path(args.out).with_suffix(".png")
@@ -82,6 +88,11 @@ def main() -> None:
     p.add_argument("--hfov", type=float, help="Approximate horizontal field of view in degrees")
     p.add_argument("--stride", type=int, default=1)
     p.add_argument("--max-frames", type=int, default=60)
+    p.add_argument("--robot-side", choices=["top", "bottom", "left", "right"],
+                   help="Image edge nearest the robot. If the tag can't be decoded (too small/blurred), its "
+                        "black square is used instead, top edge away from the robot")
+    p.add_argument("--corners", help="Override: the tag's black-square corners in pixels, 'x1,y1,x2,y2,x3,y3,x4,y4' "
+                                     "(any order; needs --robot-side)")
     p.add_argument("--out", type=Path, default=Path("data/calib/camera.json"))
     p.set_defaults(func=cmd_table)
 

@@ -16,6 +16,8 @@ Setup folder (record these once per camera placement):
   checkerboard.mp4  a checkerboard moved around the view (better intrinsics)              (optional)
   setup.json        {"tag_size": 0.16, "tag_id": 0, "hfov": 70, "pattern": "9x6", "square": 0.025,
                      "base_xyz": "-0.30,0,-0.45"}                                          (optional)
+                    tag too small/blurred to decode: add "robot_side": "top" (image edge nearest the
+                    robot) to use its black square instead; or "tag_corners_px": [[x,y] x 4] by hand
 
 Job file: {"name": ..., "description": ..., "videos": [...], "setup": ..., "train": true, ...}; any
 at-skill option can be given with underscores (e.g. "image_width": 512, "segmenter": "sam3").
@@ -69,6 +71,7 @@ def prepare_setup(setup: Path) -> dict:
         calibrate.cmd_table(SimpleNamespace(
             video=tag_clip, tag_size=cfg["tag_size"], tag_family=cfg["tag_family"], tag_id=cfg["tag_id"],
             intrinsics=intrinsics if board_clip.exists() else None, hfov=cfg["hfov"], stride=1, max_frames=60, out=camera,
+            robot_side=cfg.get("robot_side"), corners=cfg.get("tag_corners_px"),
         ))
     background = setup / "background.png"
     bg_source = empty_clip if empty_clip.exists() else tag_clip

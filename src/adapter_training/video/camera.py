@@ -125,6 +125,75 @@ class TagDetector:
         return None
 
 
+ROBOT_SIDES = {"top": (0.0, 1.0), "bottom": (0.0, -1.0), "left": (1.0, 0.0), "right": (-1.0, 0.0)}  # away dir (image)
+
+
+def orient_square(quad: np.ndarray, robot_side: str) -> np.ndarray:
+    """Order 4 corners as the tag's (top-left, top-right, bottom-right, bottom-left), with the tag's top
+    edge pointing away from the robot. robot_side = the image edge nearest the robot."""
+    quad = np.asarray(quad, dtype=np.float64).reshape(4, 2)
+    d = quad - quad.mean(0)
+    quad = quad[np.argsort(np.arctan2(d[:, 1], d[:, 0]))]  # clockwise on screen (y down), from any order
+    away = np.asarray(ROBOT_SIDES[robot_side])
+    best, best_score = quad, -np.inf
+    for k in range(4):
+        q = np.roll(quad, -k, axis=0)
+        up = (q[0] + q[1]) / 2 - (q[3] + q[2]) / 2  # bottom edge -> top edge, in the image
+        score = float(np.dot(up / np.linalg.norm(up), away))
+        if score > best_score:
+            best, best_score = q, score
+    return best
+
+
+class SquareDetector:
+    """Fallback when the tag is visible but too small or blurred to decode: find its black square (a dark
+    quadrilateral with lighter bits inside, surrounded by a light border) and orient it from robot_side.
+    Same corners as TagDetector, so the calibration is identical; only the orientation is assumed."""
+
+    def __init__(self, robot_side: str, min_area_px: float = 300.0):
+        self.robot_side = robot_side
+        self.min_area_px = min_area_px
+
+    def detect(self, frame_rgb: np.ndarray) -> np.ndarray | None:
+        gray = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2GRAY)
+        dark = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 51, 10)
+        contours, _ = cv2.findContours(dark, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+        best, best_score = None, 0.0
+        for c in contours:
+            area = cv2.contourArea(c)
+            if area < self.min_area_px:
+                continue
+            quad = cv2.approxPolyDP(c, 0.04 * cv2.arcLength(c, True), True)
+            if len(quad) != 4 or not cv2.isContourConvex(quad):
+                continue
+            quad = quad.reshape(4, 2).astype(np.float32)
+            sides = np.linalg.norm(quad - np.roll(quad, -1, axis=0), axis=1)
+            if sides.max() / sides.min() > 1.6:  # a tag seen from above is close to square
+                continue
+            inside = np.zeros_like(gray)
+            cv2.fillConvexPoly(inside, quad.astype(np.int32), 255)
+            centre = quad.mean(0)
+            ring = np.zeros_like(gray)
+            cv2.fillConvexPoly(ring, ((quad - centre) * 1.2 + centre).astype(np.int32), 255)
+            ring[inside > 0] = 0
+            if not ring.any():
+                continue
+            g_in, g_ring = gray[inside > 0].astype(float), gray[ring > 0].astype(float)
+            threshold = (np.median(g_in) + np.median(g_ring)) / 2
+            bits = float((g_in > threshold).mean())  # the tag's light bits
+            contrast = float(np.median(g_ring) - np.percentile(g_in, 25))
+            if not (0.1 < bits < 0.65) or contrast < 40:
+                continue
+            score = contrast * area ** 0.5
+            if score > best_score:
+                best, best_score = quad, score
+        if best is None:
+            return None
+        refined = cv2.cornerSubPix(gray, best.reshape(-1, 1, 2).copy(), (3, 3), (-1, -1),
+                                   (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.01))
+        return orient_square(refined.reshape(4, 2), self.robot_side)
+
+
 def tag_pose(corners: np.ndarray, tag_size_m: float, K: np.ndarray, dist: np.ndarray) -> tuple[np.ndarray, float]:
     """Pose of the tag in the camera frame (4x4) and the reprojection error in pixels."""
     s = tag_size_m / 2
@@ -152,20 +221,40 @@ def average_poses(poses: list[np.ndarray]) -> np.ndarray:
 
 
 def table_pose_from_frames(
-    frames: list[np.ndarray], tag_size_m: float, K: np.ndarray, dist: np.ndarray, family="36h11", tag_id=None
+    frames: list[np.ndarray], tag_size_m: float, K: np.ndarray, dist: np.ndarray, family="36h11", tag_id=None,
+    robot_side: str | None = None, corners_px: list | None = None,
 ) -> tuple[np.ndarray, float, int]:
-    """Camera pose in the table frame (4x4), mean reprojection error, number of frames used."""
-    detector = TagDetector(family, tag_id)
+    """Camera pose in the table frame (4x4), mean reprojection error, number of frames used.
+
+    Overrides, for a tag that's visible but can't be decoded:
+      corners_px  the tag's black-square corners in pixels, clicked by hand (any order; with robot_side)
+      robot_side  the image edge nearest the robot ("top", "bottom", "left", "right"): if the tag can't be
+                  decoded, its black square is found by shape and oriented so its top points away from it
+    """
+    if corners_px is not None:
+        if robot_side is None:
+            raise RuntimeError("tag_corners_px needs robot_side (the image edge nearest the robot)")
+        detectors = [lambda frame: orient_square(np.asarray(corners_px, float), robot_side)]
+        frames = frames[:1]
+    else:
+        detectors = [TagDetector(family, tag_id).detect] + ([SquareDetector(robot_side).detect] if robot_side else [])
     poses, errors = [], []
-    for frame in frames:
-        corners = detector.detect(frame)
-        if corners is None:
-            continue
-        T_cam_tag, err = tag_pose(corners, tag_size_m, K, dist)
-        poses.append(T_cam_tag)
-        errors.append(err)
+    for detect in detectors:  # the decoded tag if possible, else the fallback
+        for frame in frames:
+            corners = detect(frame)
+            if corners is None:
+                continue
+            T_cam_tag, err = tag_pose(corners, tag_size_m, K, dist)
+            poses.append(T_cam_tag)
+            errors.append(err)
+        if poses:
+            if detect is not detectors[0] or corners_px is not None:
+                print(f"[calibrate] tag not decoded: used its black square, top edge away from the robot "
+                      f"(robot_side={robot_side!r}); check the axes picture")
+            break
     if not poses:
-        raise RuntimeError("AprilTag not found in any frame. Check --tag-family / --tag-id and lighting.")
+        hint = "" if robot_side else ' Set "robot_side" in setup.json to use the tag\'s square without decoding it.'
+        raise RuntimeError("AprilTag not found in any frame. Check --tag-family / --tag-id and lighting." + hint)
     T_cam_tag = average_poses(poses)
     T_cam_table = T_cam_tag.copy()
     T_cam_table[:3, :3] = T_cam_tag[:3, :3] @ R_TAG_TABLE
