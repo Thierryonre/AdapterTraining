@@ -10,7 +10,14 @@ wheels/
 .venv
 
 # Data and training outputs
-data/
+data/lerobot
+data/models
+data/raw
+data/robots
+data/samples
+data/setup_test
+data/synthetic
+data/synthetic_bottle
 outputs/
 wandb/
 third_party/
