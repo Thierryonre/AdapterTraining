@@ -88,13 +88,13 @@ def skill_argv(job: dict, setup: dict) -> list[str]:
             "--videos", *map(str, job["videos"]), "--calib", str(setup["camera"]),
             "--background", str(setup["background"])]
     if setup.get("base_xyz") and "base_xyz" not in job:
-        argv += ["--base-xyz", setup["base_xyz"]]
+        argv += [f"--base-xyz={setup['base_xyz']}"]  # "=": values like -0.30,0,-0.45 start with "-"
     skip = {"name", "description", "videos", "setup", "calib", "background", "evaluate"}
     for key, value in job.items():
         if key in skip or value is None or value is False:
             continue
         flag = "--" + key.replace("_", "-")
-        argv += [flag] if value is True else [flag, str(value)]
+        argv += [flag] if value is True else [f"{flag}={value}"]
     return argv
 
 
