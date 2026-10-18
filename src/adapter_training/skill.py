@@ -15,6 +15,8 @@ Exit code 0 = dataset (and adapter) produced, 1 = stopped by a quality gate, 2 =
 With --train, adapters are versioned (outputs/train/<skill>/v1, v2, ...). After training, the new adapter
 and the previously promoted one run closed-loop in simulation on the same object layouts; the new one is
 promoted (latest.txt) only if it reaches --min-sim-success and isn't more than --max-regression worse.
+With --save-freq, every saved checkpoint of the new version is evaluated and the best one is used
+(written to vN/best.txt).
 """
 
 import argparse
@@ -191,13 +193,25 @@ def run(args) -> int:
             if args.sim_episodes > 0:
                 from adapter_training import sim_eval
 
-                ckpts = [train_out] + ([previous] if previous and previous.exists() else [])
+                # With --save-freq: every saved checkpoint of the new version, then keep the best.
+                new_ckpts = sim_eval.list_checkpoints(train_out) if args.save_freq else [train_out]
+                has_prev = bool(previous and previous.exists())
+                ckpts = new_ckpts + ([previous] if has_prev else [])
                 res = sim_eval.evaluate(ckpts, sources, args.calib, args.background, episodes=args.sim_episodes,
                                         videos=2, out=out / "sim_eval", base_xyz=args.base_xyz)
-                new_rate = res["checkpoints"][str(train_out)]["success_rate"]
-                prev_rate = res["checkpoints"][str(previous)]["success_rate"] if previous and len(ckpts) > 1 else None
+                best = sim_eval.pick_best(new_ckpts, res)
+                if best != train_out:
+                    (train_out / "best.txt").write_text(best.name)
+                    adapter = sim_eval.resolve_checkpoint(train_out)
+                    job.stage("training", adapter=str(adapter), best_checkpoint=best.name)
+                    result["adapter"] = str(adapter)
+                new_rate = res["checkpoints"][str(best)]["success_rate"]
+                prev_rate = res["checkpoints"][str(previous)]["success_rate"] if has_prev else None
                 info = {"new_success_rate": new_rate, "previous_success_rate": prev_rate,
                         "episodes": args.sim_episodes, "videos": str(out / "sim_eval")}
+                if len(new_ckpts) > 1:
+                    info["checkpoints"] = {c.name: res["checkpoints"][str(c)]["success_rate"] for c in new_ckpts}
+                    info["best_checkpoint"] = best.name
                 if new_rate < args.min_sim_success:
                     job.fail("sim_evaluation", f"new adapter succeeds in {new_rate:.0%} of simulated episodes "
                              f"(need {args.min_sim_success:.0%}); kept as v{version} but not promoted", **info)
@@ -245,7 +259,8 @@ def build_parser() -> argparse.ArgumentParser:
                         "groot (GR00T N1.7: GPU and `uv sync --extra groot`)")
     p.add_argument("--steps", type=int, default=20000)
     p.add_argument("--batch-size", type=int, help="Default: 64 for pi05/groot (80 GB GPU), 32 for smolvla")
-    p.add_argument("--save-freq", type=int, help="Also save a checkpoint every N steps (default: only at the end)")
+    p.add_argument("--save-freq", type=int, help="Also save a checkpoint every N steps (default: only at the end); "
+                                                 "all are compared in simulation and the best is used")
     p.add_argument("--stop-after", choices=["perception", "prepare"], help="Stop early (debugging)")
     gates = p.add_argument_group("quality gates")
     gates.add_argument("--min-tracked", type=float, default=0.8, help="Min fraction of frames with both hands tracked")

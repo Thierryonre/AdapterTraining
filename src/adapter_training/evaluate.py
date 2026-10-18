@@ -26,8 +26,10 @@ from adapter_training.common import dataset_root, default_device, default_video_
 
 
 def resolve_checkpoint(path: Path) -> Path:
-    """Accept a run dir, a checkpoint dir, or a pretrained_model dir."""
-    for candidate in (path, path / "pretrained_model", path / "checkpoints" / "last" / "pretrained_model"):
+    """Accept a run dir (its best.txt checkpoint, else the last), a checkpoint dir, or a pretrained_model dir."""
+    best = path / "best.txt"
+    chosen = path / "checkpoints" / best.read_text().strip() if best.exists() else path / "checkpoints" / "last"
+    for candidate in (path, path / "pretrained_model", chosen / "pretrained_model"):
         if (candidate / "config.json").exists():
             return candidate
     raise SystemExit(f"No pretrained_model/config.json found under {path}")

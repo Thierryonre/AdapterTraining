@@ -9,6 +9,14 @@ comparison is fair), renders the camera image exactly as for training (robot + o
 the real background), runs the policy, steps the physics, and applies the skill's inferred success
 check. Placement is a bit wider than during generation and uses different random seeds.
 
+A training dir (vN) means its chosen checkpoint (best.txt, written when checkpoints were compared,
+else the last one). With --all-checkpoints, every checkpoint saved in each training dir is evaluated
+instead (training with --save-freq) and the best is reported:
+
+    uv run at-sim-eval --all-checkpoints --checkpoints outputs/train/stack_sponges/v1 \
+        --sources outputs/skills/stack_sponges/datagen/sources.hdf5 --calib data/setup/camera.json \
+        --background data/setup/background.png --episodes 100
+
 Simulation success is a filter and a way to rank adapters, not a prediction of real-robot success:
 the policy was trained on data from this simulator, so this is optimistic.
 """
@@ -33,10 +41,30 @@ from adapter_training.video.pipeline import VideoWriter
 
 
 def resolve_checkpoint(path: Path) -> Path:
-    for candidate in (path, path / "pretrained_model", path / "checkpoints" / "last" / "pretrained_model"):
+    """A pretrained_model dir, a checkpoint dir, or a training dir (its best.txt checkpoint, else the last)."""
+    best = path / "best.txt"
+    chosen = path / "checkpoints" / best.read_text().strip() if best.exists() else path / "checkpoints" / "last"
+    for candidate in (path, path / "pretrained_model", chosen / "pretrained_model"):
         if (candidate / "config.json").exists():
             return candidate
     raise SystemExit(f"No pretrained_model/config.json under {path}")
+
+
+def list_checkpoints(run: Path) -> list[Path]:
+    """Every checkpoint saved in a training dir (checkpoints/005000, 010000, ...), oldest first."""
+    steps = sorted(p for p in (run / "checkpoints").glob("*")
+                   if p.name.isdigit() and (p / "pretrained_model" / "config.json").exists())
+    return steps or [run]
+
+
+def pick_best(checkpoints: list[Path], results: dict) -> Path:
+    """Highest simulated success; the earliest checkpoint wins a tie."""
+    return max(checkpoints, key=lambda c: (results["checkpoints"][str(c)]["success_rate"], -checkpoints.index(c)))
+
+
+def label(path: Path) -> str:
+    """Short unique name for files: v2 or v2_010000."""
+    return f"{path.parent.parent.name}_{path.name}" if path.parent.name == "checkpoints" else path.name
 
 
 def load_policy(ckpt: Path, device: str):
@@ -138,7 +166,7 @@ def evaluate(checkpoints: list[Path], sources_path: Path, calib: Path, backgroun
             per_episode.append(r)
             if frames:
                 out.mkdir(parents=True, exist_ok=True)
-                writer = VideoWriter(out / f"{ckpt_path.name}_episode{i}_{'success' if r['success'] else 'fail'}.mp4",
+                writer = VideoWriter(out / f"{label(ckpt_path)}_episode{i}_{'success' if r['success'] else 'fail'}.mp4",
                                      env.sim.control_hz, (frames[0].shape[1], frames[0].shape[0]))
                 for f in frames:
                     writer.write(f)
@@ -161,6 +189,8 @@ def evaluate(checkpoints: list[Path], sources_path: Path, calib: Path, backgroun
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--checkpoints", nargs="+", type=Path, required=True, help="Training dirs or pretrained_model dirs")
+    p.add_argument("--all-checkpoints", action="store_true",
+                   help="Evaluate every checkpoint saved in each training dir (not just its chosen one)")
     p.add_argument("--sources", type=Path, required=True, help="sources.hdf5 of the skill (scene + task)")
     p.add_argument("--calib", type=Path, required=True)
     p.add_argument("--background", type=Path)
@@ -173,9 +203,15 @@ def main() -> None:
     p.add_argument("--device")
     p.add_argument("--base-xyz")
     a = p.parse_args()
-    res = evaluate(a.checkpoints, a.sources, a.calib, a.background, a.episodes, a.seed, a.widen, a.max_steps,
+    checkpoints = [c for run in a.checkpoints for c in list_checkpoints(run)] if a.all_checkpoints else a.checkpoints
+    res = evaluate(checkpoints, a.sources, a.calib, a.background, a.episodes, a.seed, a.widen, a.max_steps,
                    a.videos, a.out, a.device, a.base_xyz)
     print(json.dumps({k: v["success_rate"] for k, v in res["checkpoints"].items()}, indent=2))
+    if a.all_checkpoints:
+        for run in a.checkpoints:
+            ckpts = list_checkpoints(run)
+            best = pick_best(ckpts, res)
+            print(f"best in {run}: {best} ({res['checkpoints'][str(best)]['success_rate']:.0%})")
 
 
 if __name__ == "__main__":
