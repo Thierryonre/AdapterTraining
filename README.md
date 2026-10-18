@@ -31,6 +31,18 @@ Windows certificate store. That's needed on this machine because something re-si
 
 ---
 
+# Cloud: Modal H200 (`modal_app.py`)
+
+```bash
+uvx modal run --detach modal_app.py --job jobs/example_stack_sponges.json \
+  --args "--n 1000 --steps 30000 --save-freq 5000 --workers 16"
+```
+
+Same `at-run`, on an H200 with everything preinstalled (SAM 3D Objects, WiLoR, ...). Checkpoints are kept
+on the Modal volume `adapter-training-work` (optionally also copied to Google Drive). One-time setup (Modal
+login, a secret with `HF_TOKEN`) and details: QUICKSTART.md, "Run on Modal (H200) instead". Test the image
+with `AT_MODAL_NO_SECRET=1 uvx modal run modal_app.py::check`.
+
 # One command: `at-run`
 
 ```bash
@@ -116,6 +128,12 @@ A plain "base model without adapter" comparison isn't included: on OpenArm the b
 input/output layers for this robot, so it would always score ~0%. Comparing against the previous version
 is what tells you whether new clips or settings helped.
 
+**Choosing the best checkpoint.** Add `--save-freq 5000` to `at-run`/`at-skill` to also save every 5k steps
+(`vN/checkpoints/005000`, …). All of them are then evaluated in simulation, the best is written to
+`vN/best.txt`, and that's the adapter that is promoted and reported. `at-sim-eval --all-checkpoints
+--checkpoints outputs/train/<skill>/vN ...` re-ranks them on demand without listing them (see QUICKSTART.md,
+"Choosing the best checkpoint").
+
 **Simulation success is optimistic.** The policy was trained on data from this simulator. Use it to catch broken
 training and to rank adapters, then confirm on the real robot.
 
@@ -163,10 +181,13 @@ matching SmolVLA's input size, so object details survive.
 ```bash
 bash scripts/install_wilor.sh                    # hand tracker
 hf auth login                                    # after requesting access to facebook/sam3 (gated)
-# SAM 3D Objects: Linux, NVIDIA GPU with >= 32 GB VRAM, its own conda env (see its doc/setup.md),
-# checkpoints from facebook/sam-3d-objects (gated). Then point at-skill to it:
-export SAM3D_PYTHON=/path/to/envs/sam3d-objects/bin/python
-export SAM3D_REPO=/path/to/sam-3d-objects
+# SAM 3D Objects: Linux, NVIDIA GPU with >= 32 GB VRAM, its own conda env, checkpoints from
+# facebook/sam-3d-objects (gated). Step-by-step install: QUICKSTART.md, section 1. Installed there it's
+# found automatically:
+#   code + checkpoints: AdapterTraining/third_party/sam-3d-objects
+#   python:             ~/miniforge3/envs/sam3d-objects/bin/python  (also ~/miniconda3, ~/mambaforge, ~/anaconda3)
+uv run python -m adapter_training.perception.reconstruct     # shows where it was found
+# Elsewhere, set e.g. SAM3D_PYTHON=/opt/conda/envs/sam3d-objects/bin/python SAM3D_REPO=/workspace/sam-3d-objects
 ```
 
 SAM 3D Objects runs as a separate process (`scripts/sam3d_worker.py`), because its environment
@@ -492,7 +513,8 @@ alpha=64, lr 1e-3 → 1e-4, targeting the action expert's `q_proj`/`v_proj` plus
 | `--full-train-projections` | fully train state/action projections (new robot layout), LoRA elsewhere |
 | `--no-peft` | full fine-tune of the action expert, for comparison against LoRA |
 | `--dry-run` | print the underlying `lerobot-train` command |
-| `-- <args>` | pass anything else to `lerobot-train`, e.g. `-- --wandb.enable=true` |
+| `--wandb` | log to Weights & Biases (once per machine: `uv run wandb login`, or set `WANDB_API_KEY`); also on `at-run`/`at-skill` |
+| `-- <args>` | pass anything else to `lerobot-train`, e.g. `-- --wandb.project=my_project` |
 
 One adapter per task: convert each task to its own dataset and train with its own `--job-name`.
 For a shared multi-task adapter, write all tasks into one dataset (each episode keeps its own `task` string).
