@@ -65,20 +65,47 @@ def perceive_clip(
     frame = read_frame(video, cfg.frame_index)
     h, w = frame.shape[:2]
     cal = calib.scaled(w, h) if (w, h) != (calib.width, calib.height) else calib
-    masks = segmenter(frame, [o.name for o in objects])
+    found = segmenter(frame, [o.name for o in objects])
     scene_objects, qa = [], {}
     overlay = frame.copy()
+    # One scene object per instance: identical objects (count > 1) become <name>_1, <name>_2, ... numbered
+    # left to right in the image, so the numbering is stable when clips start from similar layouts.
+    instances = []
     for info in objects:
-        name = slug(info.name)
-        if info.name not in masks:
-            qa[name] = {"ok": False, "reason": f"'{info.name}' not found in the first frame"}
-            continue
-        mask, score = masks[info.name]
+        count = max(1, getattr(info, "count", 1))
+        masks = found.get(info.name, [])[:count]
+        masks.sort(key=lambda m: float(np.nonzero(m[0])[1].mean()))
+        for k in range(count):
+            name = slug(info.name) if count == 1 else f"{slug(info.name)}_{k + 1}"
+            if k < len(masks):
+                instances.append((name, info, *masks[k]))
+            else:
+                qa[name] = {"ok": False, "reason": f"'{info.name}' found {len(masks)} time(s) in the first frame, "
+                                                   f"expected {count}"}
+    # Identical objects share one shape: reconstruct every instance, keep the mesh that fits its own outline
+    # best, and fit that mesh to all of them (seen from above, a wrong height barely changes an outline).
+    meshes, shared = {}, {}
+    if reconstructor is not None:
+        for name, info, mask, _ in instances:
+            try:
+                meshes[name] = reconstructor(frame, mask)
+                if max(1, getattr(info, "count", 1)) > 1:
+                    iou = fit_mesh(meshes[name], mask, cal).iou
+                    if iou > shared.get(info.name, (None, -1.0))[1]:
+                        shared[info.name] = (meshes[name], iou, name)
+            except Exception as e:  # noqa: BLE001  (reported per object below)
+                meshes[name] = e
+    for name, info, mask, score in instances:
         entry = {"segmentation_score": score, "mask_pixels": int(mask.sum())}
         fit, mesh_iou = None, None
         if reconstructor is not None:
             try:
-                fit = fit_mesh(reconstructor(frame, mask), mask, cal)
+                mesh = shared[info.name][0] if info.name in shared else meshes[name]
+                if isinstance(mesh, Exception):
+                    raise mesh
+                if info.name in shared:
+                    entry["shape_from"] = shared[info.name][2]
+                fit = fit_mesh(mesh, mask, cal)
                 mesh_iou = fit.iou
             except Exception as e:  # reconstruction or fitting failed: fall back to primitives
                 entry["reconstruction_error"] = f"{type(e).__name__}: {e}"[:300]

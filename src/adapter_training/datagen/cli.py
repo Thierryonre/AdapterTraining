@@ -246,6 +246,7 @@ def merge_hdf5(parts: list[Path], out: Path) -> int:
 
 
 def cmd_generate(args) -> dict:
+    import multiprocessing
     from concurrent.futures import ProcessPoolExecutor
 
     sources, _ = load_sources(args.sources)
@@ -260,7 +261,9 @@ def cmd_generate(args) -> dict:
         results = [_generate_worker(args, 0, args.n, args.max_trials, args.out)]
     else:
         parts = [args.out.with_name(f"{args.out.stem}.part{i}.hdf5") for i in range(workers)]
-        with ProcessPoolExecutor(workers) as pool:
+        # "spawn", not Linux's default "fork": this process has usually used the GPU already (SAM 3, EGL
+        # rendering during replay), and forked children inheriting that state deadlock in the NVIDIA driver.
+        with ProcessPoolExecutor(workers, mp_context=multiprocessing.get_context("spawn")) as pool:
             futures = [pool.submit(_generate_worker, args, i, targets[i], trials[i], parts[i]) for i in range(workers)]
             results = [f.result() for f in futures]
         merge_hdf5(parts, args.out)

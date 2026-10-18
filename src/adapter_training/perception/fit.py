@@ -195,15 +195,24 @@ def fit_shape(
     return res.x, -float(res.fun)
 
 
+# Seen from above, a flat object and the same object standing on edge can have nearly the same outline
+# (a sponge: IoU 0.98 standing vs ~0.94 flat). Between poses that fit about equally well, prefer the lower
+# one: score = IoU - TALL_PENALTY * height / longest side. Clear cases (an upright bottle's round outline
+# vs a lying bottle's long one) differ by far more than this and are unaffected.
+TALL_PENALTY = 0.08
+
+
 def fit_mesh(mesh: trimesh.Trimesh, mask: np.ndarray, calib: Calibration) -> FitResult:
     """Best stable resting orientation + uniform scale + pose for a reconstructed mesh."""
     coarse = simplify(mesh)
     best = None
     for R in resting_orientations(coarse):
-        params, score = fit_shape(canonicalise(coarse, R), mask, calib)
-        if best is None or score > best[1]:
-            best = (R, score, params)
-    R, score, (x, y, yaw, log_s) = best
+        unit = canonicalise(coarse, R)
+        params, score = fit_shape(unit, mask, calib)
+        ranked = score - TALL_PENALTY * float(unit.extents[2])  # unit mesh: longest side = 1
+        if best is None or ranked > best[3]:
+            best = (R, score, params, ranked)
+    R, score, (x, y, yaw, log_s), _ = best
     unit = canonicalise(mesh, R)  # full-detail mesh in the chosen orientation
     scaled = unit.copy()
     scaled.apply_scale(float(np.exp(log_s)))

@@ -27,8 +27,9 @@ SCHEMA = {
                     "role": {"type": "string", "enum": ["manipulated", "target", "static"]},
                     "shape_hint": {"type": "string", "enum": ["cylinder", "box", "other"]},
                     "mass_kg": {"type": "number"},
+                    "count": {"type": "integer", "description": "How many of these identical objects take part"},
                 },
-                "required": ["name", "role", "shape_hint", "mass_kg"],
+                "required": ["name", "role", "shape_hint", "mass_kg", "count"],
                 "additionalProperties": False,
             },
         },
@@ -45,8 +46,10 @@ The image is the first frame of the demonstration video. List the physical objec
 skill: the ones that get picked up or moved ("manipulated"), and ones they are placed on or in
 ("target"). Leave out the table, the person, their hands and clothing, and background items the skill
 doesn't touch. For each object give:
-- name: a short lowercase noun phrase that identifies it in the image (e.g. "water bottle", "red cup"),
-  distinct between objects
+- name: a short lowercase singular noun phrase that identifies it in the image (e.g. "water bottle",
+  "red cup"), distinct between different kinds of objects
+- count: how many of this object take part. Identical objects are one entry with a count, e.g.
+  stacking one sponge on another is {{"name": "sponge", "count": 2}}
 - shape_hint: "cylinder" or "box" if a simple shape describes it well, else "other"
 - mass_kg: your best estimate of its mass as it appears (e.g. a full 500 ml bottle is about 0.55 kg)"""
 
@@ -57,6 +60,7 @@ class ObjectInfo:
     role: str = "manipulated"
     shape_hint: str = "other"
     mass_kg: float | None = None
+    count: int = 1  # identical objects taking part (e.g. 2 sponges to stack); each becomes its own object
 
 
 def _image_block(image_rgb: np.ndarray, max_width: int = 1024) -> dict:
@@ -90,29 +94,56 @@ def describe_objects_with_claude(name: str, description: str, first_frame: np.nd
         raise RuntimeError(f"declined: {getattr(response.stop_details, 'category', None)}")
     text = next(b.text for b in response.content if b.type == "text")
     objects = json.loads(text)["objects"]
-    return [ObjectInfo(o["name"].strip().lower(), o["role"], o["shape_hint"], float(o["mass_kg"])) for o in objects]
+    return [ObjectInfo(o["name"].strip().lower(), o["role"], o["shape_hint"], float(o["mass_kg"]), max(1, int(o.get("count", 1))))
+            for o in objects]
 
 
 STOP = {"in", "on", "into", "onto", "to", "from", "with", "and", "then", "off", "of", "at", "inside", "under", "over", "next", "by"}
+# Words that refer to another object or a place on it, not an object of their own ("on top of the other").
+REFERENCES = {"other", "others", "one", "ones", "it", "them", "top", "bottom", "side", "middle", "rest", "same", "first",
+              "second", "end", "edge", "left", "right", "surface"}
+NUMBERS = {"two": 2, "both": 2, "pair": 2, "three": 3, "four": 4, "five": 5}
+
+
+def singular(phrase: str) -> tuple[str, bool]:
+    """'sponges' -> ('sponge', True); 'glass' -> ('glass', False). Only the last word is changed."""
+    *head, last = phrase.split()
+    if last.endswith("ies") and len(last) > 4:
+        last, plural = last[:-3] + "y", True
+    elif last.endswith(("ches", "shes", "xes", "sses")):
+        last, plural = last[:-2], True
+    elif last.endswith("s") and not last.endswith(("ss", "us", "is")) and len(last) > 3:
+        last, plural = last[:-1], True
+    else:
+        plural = False
+    return " ".join([*head, last]), plural
 
 
 def describe_objects_heuristic(name: str, description: str) -> list[ObjectInfo]:
-    """Noun phrases after 'the/a/an' (e.g. 'Put the red block in the bowl' -> red block, bowl)."""
+    """Noun phrases after 'the/a/an' or a number (e.g. 'Put the red block in the bowl' -> red block, bowl).
+    Plurals become a count ('stack the sponges' -> sponge x2); 'the other', 'the top' etc. are skipped."""
     text = f"{name}. {description}".lower()
-    found = []
+    found: dict[str, int] = {}
     words = re.findall(r"[a-z][a-z\-]*|[.,;]", text)
     for i, word in enumerate(words):
-        if word not in ("the", "a", "an"):
+        if word not in ("the", "a", "an", "of") and word not in NUMBERS:
             continue
         phrase = []
         for nxt in words[i + 1 : i + 4]:
             if nxt in STOP or nxt in ("the", "a", "an", ".", ",", ";"):
                 break
             phrase.append(nxt)
-        phrase = " ".join(phrase)
-        if phrase and phrase not in {"table", "hand", "left hand", "right hand", "robot"} and phrase not in found:
-            found.append(phrase)
-    return [ObjectInfo(p, "manipulated" if i == 0 else "target") for i, p in enumerate(found)]
+        number = NUMBERS.get(word)
+        while phrase and phrase[0] in NUMBERS:  # "the two cups"
+            number = NUMBERS[phrase.pop(0)]
+        if not phrase or phrase[-1] in REFERENCES or phrase[0] in REFERENCES:
+            continue
+        noun, plural = singular(" ".join(phrase))
+        if noun in {"table", "hand", "left hand", "right hand", "robot", "skill", "surface"}:
+            continue
+        count = number or (2 if plural else 1)
+        found[noun] = max(found.get(noun, 1), count)
+    return [ObjectInfo(n, "manipulated" if i == 0 else "target", count=c) for i, (n, c) in enumerate(found.items())]
 
 
 def describe_objects(name: str, description: str, first_frame: np.ndarray, use_claude: bool = True) -> tuple[list[ObjectInfo], str]:

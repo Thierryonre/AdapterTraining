@@ -94,7 +94,14 @@ class WiLoRTracker:
 
         device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         dtype = torch.float16 if device == "cuda" else torch.float32
-        self.pipe = WiLorHandPose3dEstimationPipeline(device=torch.device(device), dtype=dtype, verbose=False)
+        # wilor-mini's hand detector (ultralytics 8.1) pickles whole modules, which torch >= 2.6 refuses
+        # to load by default (weights_only=True). Allow it only while WiLoR loads its own weights.
+        torch_load = torch.load
+        torch.load = lambda *a, **kw: torch_load(*a, **{"weights_only": False, **kw})
+        try:
+            self.pipe = WiLorHandPose3dEstimationPipeline(device=torch.device(device), dtype=dtype, verbose=False)
+        finally:
+            torch.load = torch_load
 
     def __call__(self, frame_rgb: np.ndarray, frame_index: int) -> list[HandObservation]:
         h, w = frame_rgb.shape[:2]

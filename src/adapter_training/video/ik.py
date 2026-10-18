@@ -87,9 +87,20 @@ class BimanualIK:
             active.append(task)
 
         for _ in range(self.iterations):
-            vel = mink.solve_ik(
-                self.configuration, [*active, self.posture], self.dt, "daqp", damping=1e-3, limits=self.limits
-            )
+            try:
+                vel = mink.solve_ik(
+                    self.configuration, [*active, self.posture], self.dt, "daqp", damping=1e-3, limits=self.limits
+                )
+            except mink.NoSolutionFound:
+                # The table constraint can be infeasible, e.g. when the arm already starts within its margin.
+                # Take this step with joint limits only (lets it move clear); if even that fails, hold.
+                try:
+                    vel = mink.solve_ik(
+                        self.configuration, [*active, self.posture], self.dt, "daqp", damping=1e-3,
+                        limits=self.limits[:1],
+                    )
+                except mink.NoSolutionFound:
+                    break
             self.configuration.integrate_inplace(vel, self.dt)
 
         pos_err, rot_err = {}, {}

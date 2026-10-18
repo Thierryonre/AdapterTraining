@@ -84,7 +84,11 @@ class Sam3DObjectsReconstructor:
             cv2.imwrite(str(tmp / "mask.png"), mask.astype(np.uint8) * 255)
             cmd = [str(self.python), str(WORKER), "--repo", str(self.repo), "--image", str(tmp / "image.png"),
                    "--mask", str(tmp / "mask.png"), "--out", str(tmp / "object.glb"), "--seed", str(seed)]
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=self.timeout_s)
+            # What `conda activate` would set: SAM 3D's notebook/inference.py reads CONDA_PREFIX (CUDA_HOME).
+            prefix = str(self.python.resolve().parent.parent)
+            env = {**os.environ, "CONDA_PREFIX": prefix, "CUDA_HOME": prefix,
+                   "PATH": f"{prefix}/bin{os.pathsep}{os.environ.get('PATH', '')}"}
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=self.timeout_s, env=env)
             if proc.returncode != 0:
                 raise RuntimeError(f"SAM 3D Objects failed:\n{proc.stderr[-2000:]}")
             info = json.loads((tmp / "object.json").read_text())

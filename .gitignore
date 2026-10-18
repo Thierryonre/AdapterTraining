@@ -22,3 +22,6 @@ outputs/
 wandb/
 third_party/
 scratch_*
+
+# Modal secret values (HF token, Drive token, ...)
+modal.env

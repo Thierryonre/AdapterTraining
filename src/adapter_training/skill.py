@@ -99,7 +99,7 @@ def run(args) -> int:
         v_args = pipeline.build_parser().parse_args(
             [*map(str, args.videos), "--calib", str(args.calib), "--task", task_text, "--out", str(part1),
              "--tracker", args.tracker, *(["--reuse-tracks"] if args.reuse_tracks else []),
-             *(["--base-xyz", args.base_xyz] if args.base_xyz else [])]
+             *([f"--base-xyz={args.base_xyz}"] if args.base_xyz else [])]
         )
         summaries = pipeline.run(v_args)
         tracked = {
@@ -134,7 +134,7 @@ def run(args) -> int:
 
         common = ["--calib", str(args.calib), "--image-width", str(args.image_width),
                   *(["--background", str(args.background)] if args.background else []),
-                  *(["--base-xyz", args.base_xyz] if args.base_xyz else []), *(["--shadows"] if args.shadows else [])]
+                  *([f"--base-xyz={args.base_xyz}"] if args.base_xyz else []), *(["--shadows"] if args.shadows else [])]
         sources = out / "datagen" / "sources.hdf5"
         prep = datagen.cmd_prepare(datagen.build_parser().parse_args(
             ["prepare", str(part1 / "demos.hdf5"), "--scenes", str(part1 / "scenes"), "--out", str(sources), "--videos", *common]
